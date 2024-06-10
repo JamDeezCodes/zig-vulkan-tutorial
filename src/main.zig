@@ -8,6 +8,9 @@ const mat4 = mach.math.mat4x4;
 const Vec4 = mach.math.Vec4;
 const Mat4x4 = mach.math.Mat4x4;
 
+const width = 800;
+const height = 600;
+
 /// Default GLFW error handling callback
 fn errorCallback(error_code: glfw.ErrorCode, description: [:0]const u8) void {
     std.log.err("glfw: {}: {s}\n", .{ error_code, description });
@@ -21,7 +24,54 @@ const BaseDispatch = vk.BaseWrapper(&.{.{
     },
 }});
 
+const HelloTriangleApplication = struct {
+    window: *const glfw.Window,
+
+    pub fn run(self: *HelloTriangleApplication) !void {
+        self.initWindow();
+        defer self.cleanup();
+        self.initVulkan();
+        self.mainLoop();
+    }
+
+    fn initWindow(self: *HelloTriangleApplication) void {
+        if (!glfw.init(.{})) {
+            std.log.err("failed to initialize GLFW: {?s}", .{glfw.getErrorString()});
+            std.process.exit(1);
+        }
+
+        const window = glfw.Window.create(width, height, "Vulkan", null, null, .{
+            .client_api = .no_api,
+            .resizable = false,
+        }) orelse {
+            std.log.err("failed to create GLFW window: {?s}", .{glfw.getErrorString()});
+            std.process.exit(1);
+        };
+
+        self.window = &window;
+    }
+
+    fn initVulkan(_: *HelloTriangleApplication) void {}
+
+    fn mainLoop(self: *HelloTriangleApplication) void {
+        while (!self.window.shouldClose()) {
+            glfw.pollEvents();
+        }
+    }
+
+    fn cleanup(self: *HelloTriangleApplication) void {
+        self.window.destroy();
+        glfw.terminate();
+    }
+};
+
 pub fn main() !void {
+    var app: HelloTriangleApplication = undefined;
+
+    try app.run();
+}
+
+pub fn _main() !void {
     glfw.setErrorCallback(errorCallback);
 
     if (!glfw.init(.{})) {
@@ -33,16 +83,9 @@ pub fn main() !void {
 
     const extent = vk.Extent2D{ .width = 800, .height = 600 };
 
-    const window = glfw.Window.create(
-        extent.width,
-        extent.height,
-        "Vulkan window",
-        null,
-        null,
-        .{
-            .client_api = .no_api,
-        },
-    ) orelse {
+    const window = glfw.Window.create(extent.width, extent.height, "Vulkan window", null, null, .{
+        .client_api = .no_api,
+    }) orelse {
         std.log.err("failed to create GLFW window: {?s}", .{glfw.getErrorString()});
         std.process.exit(1);
     };
