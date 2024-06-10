@@ -36,6 +36,24 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Use mach-glfw.
+    const mach_glfw_dep = b.dependency("mach-glfw", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    exe.root_module.addImport("mach-glfw", mach_glfw_dep.module("mach-glfw"));
+
+    const vkzig_dep = b.dependency("vulkan_zig", .{
+        .registry = @as([]const u8, b.pathFromRoot("vk.xml")),
+    });
+    const vkzig_bindings = vkzig_dep.module("vulkan-zig");
+    exe.root_module.addImport("vulkan", vkzig_bindings);
+
+    // Use pre-generated Vulkan bindings.
+    //const vulkan_dep = b.dependency("vulkan-zig-generated", .{});
+    //exe.root_module.addImport("vulkan", vulkan_dep.module("vulkan-zig-generated"));
+
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
