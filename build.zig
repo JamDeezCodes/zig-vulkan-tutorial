@@ -50,9 +50,15 @@ pub fn build(b: *std.Build) void {
     const vkzig_bindings = vkzig_dep.module("vulkan-zig");
     exe.root_module.addImport("vulkan", vkzig_bindings);
 
-    // Use pre-generated Vulkan bindings.
-    //const vulkan_dep = b.dependency("vulkan-zig-generated", .{});
-    //exe.root_module.addImport("vulkan", vulkan_dep.module("vulkan-zig-generated"));
+    // Add Mach to our library and executable
+    const mach_dep = b.dependency("mach", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    lib.root_module.addImport("mach", mach_dep.module("mach"));
+    exe.root_module.addImport("mach", mach_dep.module("mach"));
+
+    @import("mach").link(mach_dep.builder, exe);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
