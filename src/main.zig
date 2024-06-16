@@ -14,11 +14,18 @@ const Mat4x4 = mach.math.Mat4x4;
 const width = 800;
 const height = 600;
 
-var allocator: std.mem.Allocator = std.heap.page_allocator;
-var base: BaseDispatch = undefined;
-var instance: InstanceDispatch = undefined;
+const validation_layers = [_][*:0]const u8{
+    "VK_LAYER_KHRONOS_validation",
+};
 
-/// Default GLFW error handling callback
+const enable_validation_layers =
+    if (builtin.mode == std.builtin.Mode.Debug) true else false;
+
+var allocator: std.mem.Allocator = std.heap.page_allocator;
+var vkb: BaseDispatch = undefined;
+var vki: InstanceDispatch = undefined;
+
+// NOTE: Default GLFW error handling callback
 fn errorCallback(error_code: glfw.ErrorCode, description: [:0]const u8) void {
     std.log.err("glfw: {}: {s}\n", .{ error_code, description });
 }
@@ -27,6 +34,7 @@ const BaseDispatch = vk.BaseWrapper(&.{.{
     .base_commands = .{
         .createInstance = true,
         .enumerateInstanceExtensionProperties = true,
+        .enumerateInstanceLayerProperties = true,
         .getInstanceProcAddr = true,
     },
 }});
@@ -71,9 +79,121 @@ fn assertRequiredExtensionsAreSupported(
     }
 }
 
+fn checkValidationLayerSupport() !bool {
+    var layer_count: u32 = 0;
+
+    _ = try vkb.enumerateInstanceLayerProperties(&layer_count, null);
+    const available_layers = try allocator.alloc(vk.LayerProperties, layer_count);
+    defer allocator.free(available_layers);
+    _ = try vkb.enumerateInstanceLayerProperties(&layer_count, available_layers.ptr);
+
+    for (validation_layers) |layer| {
+        var layer_found = false;
+
+        for (available_layers) |prop| {
+            const len = std.mem.indexOfScalar(u8, &prop.layer_name, 0).?;
+            const layer_name = prop.layer_name[0..len];
+
+            if (std.mem.eql(u8, std.mem.span(layer), layer_name)) {
+                layer_found = true;
+                break;
+            }
+        }
+
+        if (!layer_found) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+fn getRequiredExtensions() !std.ArrayList([*:0]const u8) {
+    const glfw_extensions = glfw.getRequiredInstanceExtensions() orelse return blk: {
+        const err = glfw.mustGetError();
+
+        std.log.err(
+            "failed to get required vulkan instance extensions: error={s}",
+            .{err.description},
+        );
+
+        break :blk error.code;
+    };
+
+    var instance_extensions = try std.ArrayList([*:0]const u8)
+        .initCapacity(allocator, glfw_extensions.len);
+
+    try instance_extensions.appendSlice(glfw_extensions);
+
+    if (enable_validation_layers) {
+        try instance_extensions.append(vk.extensions.ext_debug_utils.name);
+    }
+
+    if (builtin.os.tag == .macos) {
+        try instance_extensions.append(@ptrCast(
+            vk.extensions.khr_portability_enumeration.name,
+        ));
+    }
+
+    var extension_count: u32 = 0;
+    _ = try vkb.enumerateInstanceExtensionProperties(null, &extension_count, null);
+
+    const available_extensions = try allocator.alloc(vk.ExtensionProperties, extension_count);
+    defer allocator.free(available_extensions);
+
+    _ = try vkb.enumerateInstanceExtensionProperties(
+        null,
+        &extension_count,
+        available_extensions.ptr,
+    );
+
+    printAvailableExtensions(available_extensions);
+    assertRequiredExtensionsAreSupported(glfw_extensions, available_extensions);
+
+    return instance_extensions;
+}
+
+fn createDebugUtilsMessengerEXT(
+    instance: vk.Instance,
+    p_create_info: *const vk.DebugUtilsMessengerCreateInfoEXT,
+    p_allocator: ?*const vk.AllocationCallbacks,
+    p_debug_messenger: *vk.DebugUtilsMessengerEXT,
+) !vk.Result {
+    var result: vk.Result = undefined;
+
+    const maybe_func = @as(
+        ?vk.PfnCreateDebugUtilsMessengerEXT,
+        @ptrCast(vkb.getInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT")),
+    );
+
+    if (maybe_func) |func| {
+        result = func(instance, p_create_info, p_allocator, p_debug_messenger);
+    } else {
+        result = .error_extension_not_present;
+    }
+
+    return result;
+}
+
+fn destroyDebugUtilsMessengerEXT(
+    instance: vk.Instance,
+    debug_messenger: vk.DebugUtilsMessengerEXT,
+    p_allocator: ?*const vk.AllocationCallbacks,
+) void {
+    const maybe_func = @as(
+        ?vk.PfnDestroyDebugUtilsMessengerEXT,
+        @ptrCast(vkb.getInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT")),
+    );
+
+    if (maybe_func) |func| {
+        func(instance, debug_messenger, p_allocator);
+    }
+}
+
 const HelloTriangleApplication = struct {
     window: *const glfw.Window,
     instance: vk.Instance,
+    debug_messenger: vk.DebugUtilsMessengerEXT,
 
     pub fn run(self: *HelloTriangleApplication) !void {
         self.initWindow();
@@ -101,51 +221,55 @@ const HelloTriangleApplication = struct {
 
     fn initVulkan(self: *HelloTriangleApplication) !void {
         try createInstance(self);
+        setupDebugMessenger(self);
+    }
+
+    fn vkDebugUtilsMessengerCreateInfo() vk.DebugUtilsMessengerCreateInfoEXT {
+        const result: vk.DebugUtilsMessengerCreateInfoEXT = .{
+            .message_severity = vk.DebugUtilsMessageSeverityFlagsEXT{
+                .verbose_bit_ext = true,
+                .warning_bit_ext = true,
+                .error_bit_ext = true,
+            },
+            .message_type = vk.DebugUtilsMessageTypeFlagsEXT{
+                .general_bit_ext = true,
+                .validation_bit_ext = true,
+                .performance_bit_ext = true,
+            },
+            .pfn_user_callback = debugCallback,
+        };
+
+        return result;
+    }
+
+    fn setupDebugMessenger(self: *HelloTriangleApplication) void {
+        if (enable_validation_layers) {
+            const create_info = vkDebugUtilsMessengerCreateInfo();
+
+            if (try createDebugUtilsMessengerEXT(
+                self.instance,
+                &create_info,
+                null,
+                &self.debug_messenger,
+            ) != .success) {
+                @panic("failed to set up debug messenger!");
+            }
+        }
     }
 
     fn createInstance(self: *HelloTriangleApplication) !void {
-        base = try BaseDispatch.load(@as(
+        vkb = try BaseDispatch.load(@as(
             vk.PfnGetInstanceProcAddr,
             @ptrCast(&glfw.getInstanceProcAddress),
         ));
 
-        const glfw_extensions = glfw.getRequiredInstanceExtensions() orelse return blk: {
-            const err = glfw.mustGetError();
-
-            std.log.err(
-                "failed to get required vulkan instance extensions: error={s}",
-                .{err.description},
-            );
-
-            break :blk error.code;
-        };
-
-        var instance_extensions = try std.ArrayList([*:0]const u8)
-            .initCapacity(allocator, glfw_extensions.len + 1);
-
+        const instance_extensions = try getRequiredExtensions();
         defer instance_extensions.deinit();
-        try instance_extensions.appendSlice(glfw_extensions);
 
-        if (builtin.os.tag == .macos) {
-            try instance_extensions.append(@ptrCast(
-                vk.extensions.khr_portability_enumeration.name,
-            ));
+        // TODO: Improve the clarity of this conditional
+        if (enable_validation_layers and !(try checkValidationLayerSupport())) {
+            @panic("validation layers requested, but not available!");
         }
-
-        var extension_count: u32 = 0;
-        _ = try base.enumerateInstanceExtensionProperties(null, &extension_count, null);
-
-        const available_extensions = try allocator.alloc(vk.ExtensionProperties, extension_count);
-        defer allocator.free(available_extensions);
-
-        _ = try base.enumerateInstanceExtensionProperties(
-            null,
-            &extension_count,
-            available_extensions.ptr,
-        );
-
-        printAvailableExtensions(available_extensions);
-        assertRequiredExtensionsAreSupported(glfw_extensions, available_extensions);
 
         const app_info = vk.ApplicationInfo{
             .p_application_name = "Hello Triangle",
@@ -160,15 +284,25 @@ const HelloTriangleApplication = struct {
                 .enumerate_portability_bit_khr = true,
             } else .{},
             .p_application_info = &app_info,
-            .enabled_layer_count = 0,
             .enabled_extension_count = @intCast(instance_extensions.items.len),
             .pp_enabled_extension_names = @ptrCast(instance_extensions.items),
         };
 
-        self.instance = try base.createInstance(&create_info, null);
-        errdefer instance.destroyInstance(self.instance, null);
+        var debug_create_info = vkDebugUtilsMessengerCreateInfo();
+        if (enable_validation_layers) {
+            create_info.enabled_layer_count = validation_layers.len;
+            create_info.pp_enabled_layer_names = &validation_layers;
+            create_info.p_next = &debug_create_info;
+        } else {
+            create_info.enabled_layer_count = 0;
+            create_info.pp_enabled_layer_names = null;
+            create_info.p_next = null;
+        }
 
-        instance = try InstanceDispatch.load(self.instance, base.dispatch.vkGetInstanceProcAddr);
+        self.instance = try vkb.createInstance(&create_info, null);
+        errdefer vki.destroyInstance(self.instance, null);
+
+        vki = try InstanceDispatch.load(self.instance, vkb.dispatch.vkGetInstanceProcAddr);
     }
 
     fn mainLoop(self: *HelloTriangleApplication) void {
@@ -178,9 +312,36 @@ const HelloTriangleApplication = struct {
     }
 
     fn cleanup(self: *HelloTriangleApplication) void {
-        instance.destroyInstance(self.instance, null);
+        if (enable_validation_layers) {
+            destroyDebugUtilsMessengerEXT(
+                self.instance,
+                self.debug_messenger,
+                null,
+            );
+        }
+
+        vki.destroyInstance(self.instance, null);
+        // TODO: Why does produce an illegal instruction at address error?
         self.window.destroy();
         glfw.terminate();
+    }
+
+    fn debugCallback(
+        message_severity: vk.DebugUtilsMessageSeverityFlagsEXT,
+        message_type: vk.DebugUtilsMessageTypeFlagsEXT,
+        p_callback_data: ?*const vk.DebugUtilsMessengerCallbackDataEXT,
+        p_user_data: ?*anyopaque,
+    ) callconv(vk.vulkan_call_conv) vk.Bool32 {
+        std.debug.print("validation layer: {?s}\n", .{p_callback_data.?.p_message});
+
+        if (message_severity.warning_bit_ext or message_severity.error_bit_ext) {
+            // Message is important enough to show
+        }
+
+        _ = message_type;
+        _ = p_user_data;
+
+        return vk.FALSE;
     }
 };
 
@@ -190,6 +351,7 @@ pub fn main() !void {
     try app.run();
 }
 
+// NOTE: Main body function from https://vulkan-tutorial.com/Development_environment
 pub fn _main() !void {
     glfw.setErrorCallback(errorCallback);
 
