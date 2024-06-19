@@ -42,10 +42,18 @@ const BaseDispatch = vk.BaseWrapper(&.{.{
 const InstanceDispatch = vk.InstanceWrapper(&.{
     .{
         .instance_commands = .{
+            .enumeratePhysicalDevices = true,
+            .getPhysicalDeviceProperties = true,
+            .getPhysicalDeviceFeatures = true,
+            .getPhysicalDeviceQueueFamilyProperties = true,
             .destroyInstance = true,
         },
     },
 });
+
+const QueueFamilyIndices = struct {
+    graphics_family: ?u32 = null,
+};
 
 fn printAvailableExtensions(available_extensions: []vk.ExtensionProperties) void {
     std.debug.print("available extensions:\n", .{});
@@ -191,9 +199,10 @@ fn destroyDebugUtilsMessengerEXT(
 }
 
 const HelloTriangleApplication = struct {
-    window: *const glfw.Window,
-    instance: vk.Instance,
-    debug_messenger: vk.DebugUtilsMessengerEXT,
+    window: ?*const glfw.Window = null,
+    instance: vk.Instance = .null_handle,
+    debug_messenger: vk.DebugUtilsMessengerEXT = .null_handle,
+    physical_device: vk.PhysicalDevice = .null_handle,
 
     pub fn run(self: *HelloTriangleApplication) !void {
         self.initWindow();
@@ -220,8 +229,107 @@ const HelloTriangleApplication = struct {
     }
 
     fn initVulkan(self: *HelloTriangleApplication) !void {
-        try createInstance(self);
-        setupDebugMessenger(self);
+        try self.createInstance();
+        self.setupDebugMessenger();
+        try self.pickPhysicalDevice();
+    }
+
+    fn pickPhysicalDevice(self: *HelloTriangleApplication) !void {
+        var device_count: u32 = 0;
+
+        _ = try vki.enumeratePhysicalDevices(self.instance, &device_count, null);
+
+        if (device_count == 0) @panic("failed to find GPUs with Vulkan support!");
+
+        const devices = try allocator.alloc(vk.PhysicalDevice, device_count);
+        defer allocator.free(devices);
+
+        _ = try vki.enumeratePhysicalDevices(self.instance, &device_count, devices.ptr);
+
+        var candidates = std.AutoHashMap(vk.PhysicalDevice, i32).init(allocator);
+        defer candidates.deinit();
+
+        for (devices) |device| {
+            const score = rateDeviceSuitability(device);
+            try candidates.put(device, score);
+        }
+
+        var it = candidates.iterator();
+        var best_score: i32 = 0;
+        while (it.next()) |device| {
+            if (device.value_ptr.* > best_score) {
+                if (try deviceIsSuitable(device.key_ptr.*)) {
+                    best_score = device.value_ptr.*;
+
+                    self.physical_device = device.key_ptr.*;
+                }
+            }
+        }
+
+        if (self.physical_device == .null_handle) {
+            @panic("failed to find suitable GPU!");
+        }
+    }
+
+    fn deviceIsSuitable(device: vk.PhysicalDevice) !bool {
+        const indices = try findQueueFamilies(device);
+
+        return indices.graphics_family != null;
+    }
+
+    fn findQueueFamilies(device: vk.PhysicalDevice) !QueueFamilyIndices {
+        var indices: QueueFamilyIndices = .{};
+
+        var queue_family_count: u32 = 0;
+        vki.getPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, null);
+
+        const queue_families = try allocator.alloc(vk.QueueFamilyProperties, queue_family_count);
+        defer allocator.free(queue_families);
+
+        vki.getPhysicalDeviceQueueFamilyProperties(
+            device,
+            &queue_family_count,
+            queue_families.ptr,
+        );
+
+        var i: u32 = 0;
+        for (queue_families) |family| {
+            if (family.queue_flags.graphics_bit) {
+                indices.graphics_family = i;
+                break;
+            }
+
+            // NOTE: The tutorial adds this check to break out if the graphics family was
+            // set, but this seems pointless when we can do it inside the assignment block?
+            //if (indices.graphics_family) |_| {
+            //    break;
+            //}
+
+            i += 1;
+        }
+
+        return indices;
+    }
+
+    fn rateDeviceSuitability(device: vk.PhysicalDevice) i32 {
+        var result: i32 = 0;
+
+        const device_props = vki.getPhysicalDeviceProperties(device);
+        const device_features = vki.getPhysicalDeviceFeatures(device);
+
+        if (device_props.device_type == .discrete_gpu) {
+            result += 1000;
+        }
+
+        result += @intCast(device_props.limits.max_image_dimension_2d);
+
+        // NOTE: My laptop does not support geometry shaders
+        // if (device_features.geometry_shader != vk.TRUE) {
+        if (device_features.tessellation_shader != vk.TRUE) {
+            result = 0;
+        }
+
+        return result;
     }
 
     fn vkDebugUtilsMessengerCreateInfo() vk.DebugUtilsMessengerCreateInfoEXT {
@@ -306,7 +414,7 @@ const HelloTriangleApplication = struct {
     }
 
     fn mainLoop(self: *HelloTriangleApplication) void {
-        while (!self.window.shouldClose()) {
+        while (!self.window.?.shouldClose()) {
             glfw.pollEvents();
         }
     }
@@ -322,7 +430,7 @@ const HelloTriangleApplication = struct {
 
         vki.destroyInstance(self.instance, null);
         // TODO: Why does produce an illegal instruction at address error?
-        self.window.destroy();
+        self.window.?.destroy();
         glfw.terminate();
     }
 
@@ -346,7 +454,7 @@ const HelloTriangleApplication = struct {
 };
 
 pub fn main() !void {
-    var app: HelloTriangleApplication = undefined;
+    var app: HelloTriangleApplication = .{};
 
     try app.run();
 }
