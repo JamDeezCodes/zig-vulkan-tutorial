@@ -24,6 +24,7 @@ const enable_validation_layers =
 var allocator: std.mem.Allocator = std.heap.page_allocator;
 var vkb: BaseDispatch = undefined;
 var vki: InstanceDispatch = undefined;
+var vkd: DeviceDispatch = undefined;
 
 // NOTE: Default GLFW error handling callback
 fn errorCallback(error_code: glfw.ErrorCode, description: [:0]const u8) void {
@@ -42,11 +43,22 @@ const BaseDispatch = vk.BaseWrapper(&.{.{
 const InstanceDispatch = vk.InstanceWrapper(&.{
     .{
         .instance_commands = .{
+            .createDevice = true,
             .enumeratePhysicalDevices = true,
             .getPhysicalDeviceProperties = true,
             .getPhysicalDeviceFeatures = true,
             .getPhysicalDeviceQueueFamilyProperties = true,
             .destroyInstance = true,
+            .getDeviceProcAddr = true,
+        },
+    },
+});
+
+const DeviceDispatch = vk.DeviceWrapper(&.{
+    .{
+        .device_commands = .{
+            .destroyDevice = true,
+            .getDeviceQueue = true,
         },
     },
 });
@@ -203,6 +215,8 @@ const HelloTriangleApplication = struct {
     instance: vk.Instance = .null_handle,
     debug_messenger: vk.DebugUtilsMessengerEXT = .null_handle,
     physical_device: vk.PhysicalDevice = .null_handle,
+    device: vk.Device = .null_handle,
+    graphics_queue: vk.Queue = .null_handle,
 
     pub fn run(self: *HelloTriangleApplication) !void {
         self.initWindow();
@@ -232,6 +246,63 @@ const HelloTriangleApplication = struct {
         try self.createInstance();
         self.setupDebugMessenger();
         try self.pickPhysicalDevice();
+        try self.createLogicalDevice();
+    }
+
+    fn createLogicalDevice(self: *HelloTriangleApplication) !void {
+        const indices = try findQueueFamilies(self.physical_device);
+
+        const queue_priority: [1]f32 = .{1};
+        var queue_create_info: [1]vk.DeviceQueueCreateInfo = .{.{
+            .queue_family_index = indices.graphics_family.?,
+            .queue_count = 1,
+            .p_queue_priorities = &queue_priority,
+        }};
+
+        const device_features: vk.PhysicalDeviceFeatures = .{};
+
+        var create_info: vk.DeviceCreateInfo = .{
+            .p_queue_create_infos = &queue_create_info,
+            .queue_create_info_count = 1,
+            .p_enabled_features = &device_features,
+            .enabled_extension_count = 0,
+        };
+
+        var device_extensions = try std.ArrayList([*:0]const u8)
+            .initCapacity(allocator, validation_layers.len);
+        defer device_extensions.deinit();
+
+        // NOTE: It seems that even though pp_enabled_layer_names is deprecated for devices,
+        // a Validation Error is produced with or without appending the portability
+        // extensions here. The same error still presents without the portability extensions
+        // appended, but then the deprecation message goes away. Maybe this Validation Error
+        // shows erroneously with 1.3.283 but the portability extensions would be required
+        // for backwards compatibility
+        //
+        // loader_create_device_chain: Using deprecated and ignored 'ppEnabledLayerNames' member of 'VkDeviceCreateInfo' when creating a Vulkan device.
+        // Validation Error: [ VUID-VkDeviceCreateInfo-pProperties-04451 ] Object ... vkCreateDevice():
+        // VK_KHR_portability_subset must be enabled because physical device VkPhysicalDevice 0x60000269b5a0[] supports it. The Vulkan spec states:
+        // If the VK_KHR_portability_subset extension is included in pProperties of vkEnumerateDeviceExtensionProperties,
+        // ppEnabledExtensionNames must include "VK_KHR_portability_subset"
+        if (builtin.os.tag == .macos) {
+            try device_extensions.append(@ptrCast(
+                vk.extensions.khr_portability_subset.name,
+            ));
+            try device_extensions.append(@ptrCast(
+                vk.extensions.khr_portability_enumeration.name,
+            ));
+        }
+
+        if (enable_validation_layers) {
+            create_info.enabled_layer_count = @intCast(device_extensions.items.len);
+            create_info.pp_enabled_layer_names = @ptrCast(device_extensions.items);
+        } else {
+            create_info.enabled_layer_count = 0;
+        }
+
+        self.device = try vki.createDevice(self.physical_device, &create_info, null);
+        vkd = try DeviceDispatch.load(self.device, vki.dispatch.vkGetDeviceProcAddr);
+        self.graphics_queue = vkd.getDeviceQueue(self.device, indices.graphics_family.?, 0);
     }
 
     fn pickPhysicalDevice(self: *HelloTriangleApplication) !void {
@@ -420,6 +491,8 @@ const HelloTriangleApplication = struct {
     }
 
     fn cleanup(self: *HelloTriangleApplication) void {
+        vkd.destroyDevice(self.device, null);
+
         if (enable_validation_layers) {
             destroyDebugUtilsMessengerEXT(
                 self.instance,
