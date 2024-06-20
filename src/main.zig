@@ -48,7 +48,9 @@ const InstanceDispatch = vk.InstanceWrapper(&.{
             .getPhysicalDeviceProperties = true,
             .getPhysicalDeviceFeatures = true,
             .getPhysicalDeviceQueueFamilyProperties = true,
+            .getPhysicalDeviceSurfaceSupportKHR = true,
             .destroyInstance = true,
+            .destroySurfaceKHR = true,
             .getDeviceProcAddr = true,
         },
     },
@@ -65,6 +67,7 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
 
 const QueueFamilyIndices = struct {
     graphics_family: ?u32 = null,
+    present_family: ?u32 = null,
 };
 
 fn printAvailableExtensions(available_extensions: []vk.ExtensionProperties) void {
@@ -217,6 +220,8 @@ const HelloTriangleApplication = struct {
     physical_device: vk.PhysicalDevice = .null_handle,
     device: vk.Device = .null_handle,
     graphics_queue: vk.Queue = .null_handle,
+    surface: vk.SurfaceKHR = .null_handle,
+    present_queue: vk.Queue = .null_handle,
 
     pub fn run(self: *HelloTriangleApplication) !void {
         self.initWindow();
@@ -245,25 +250,61 @@ const HelloTriangleApplication = struct {
     fn initVulkan(self: *HelloTriangleApplication) !void {
         try self.createInstance();
         self.setupDebugMessenger();
+        try self.createSurface();
         try self.pickPhysicalDevice();
         try self.createLogicalDevice();
     }
 
-    fn createLogicalDevice(self: *HelloTriangleApplication) !void {
-        const indices = try findQueueFamilies(self.physical_device);
+    fn createSurface(self: *HelloTriangleApplication) !void {
+        if (glfw.createWindowSurface(
+            self.instance,
+            self.window.?.*,
+            null,
+            &self.surface,
+        ) != @intFromEnum(vk.Result.success)) {
+            @panic("failed to create window surface!");
+        }
+    }
 
+    fn createLogicalDevice(self: *HelloTriangleApplication) !void {
+        const indices = try findQueueFamilies(self, self.physical_device);
+
+        const unique_queue_families = [_]u32{ indices.graphics_family.?, indices.present_family.? };
+        var queue_create_infos = try allocator.alloc(vk.DeviceQueueCreateInfo, unique_queue_families.len);
+        defer allocator.free(queue_create_infos);
         const queue_priority: [1]f32 = .{1};
-        var queue_create_info: [1]vk.DeviceQueueCreateInfo = .{.{
-            .queue_family_index = indices.graphics_family.?,
-            .queue_count = 1,
-            .p_queue_priorities = &queue_priority,
-        }};
+
+        // NOTE: It appears that in newer versions of Vulkan, using the same queue family index across
+        // multiple create infos would be regarded as bad practice, and the following Validation Error(s)
+        // are produced when doing so to point this out:
+        //
+        // Validation Error: [ VUID-VkDeviceCreateInfo-queueFamilyIndex-02802 ] Object 0: handle = 0x6000026d5880, type = VK_OBJECT_TYPE_PHYSICAL_DEVICE;
+        //      | MessageID = 0x29498778 | vkCreateDevice(): pCreateInfo->pQueueCreateInfos[1].queueFamilyIndex (0) is not unique and was also used in
+        //      pCreateInfo->pQueueCreateInfos[0]. The Vulkan spec states: The queueFamilyIndex member of each element of pQueueCreateInfos must be unique
+        //      within pQueueCreateInfos , except that two members can share the same queueFamilyIndex if one describes protected-capable queues and one
+        //      describes queues that are not protected-capable
+        //      (https://vulkan.lunarg.com/doc/view/1.3.283.0/mac/1.3-extensions/vkspec.html#VUID-VkDeviceCreateInfo-queueFamilyIndex-02802)
+        //
+        // Validation Error: [ VUID-VkDeviceCreateInfo-pQueueCreateInfos-06755 ] Object 0: handle = 0x6000026d5880, type = VK_OBJECT_TYPE_PHYSICAL_DEVICE;
+        //      | MessageID = 0x4180bcf6 | vkCreateDevice(): pCreateInfo Total queue count requested from queue family index 0 is 2, which is greater than
+        //      queue count available in the queue family (1). The Vulkan spec states: If multiple elements of pQueueCreateInfos share the same queueFamilyIndex,
+        //      the sum of their queueCount members must be less than or equal to the queueCount member of the VkQueueFamilyProperties structure, as returned
+        //      by vkGetPhysicalDeviceQueueFamilyProperties in the pQueueFamilyProperties[queueFamilyIndex]
+        //      (https://vulkan.lunarg.com/doc/view/1.3.283.0/mac/1.3-extensions/vkspec.html#VUID-VkDeviceCreateInfo-pQueueCreateInfos-06755)
+
+        for (unique_queue_families, 0..) |queue_family, i| {
+            queue_create_infos.ptr[i] = .{
+                .queue_family_index = queue_family,
+                .queue_count = 1,
+                .p_queue_priorities = &queue_priority,
+            };
+        }
 
         const device_features: vk.PhysicalDeviceFeatures = .{};
 
         var create_info: vk.DeviceCreateInfo = .{
-            .p_queue_create_infos = &queue_create_info,
-            .queue_create_info_count = 1,
+            .queue_create_info_count = @intCast(queue_create_infos.len),
+            .p_queue_create_infos = queue_create_infos.ptr,
             .p_enabled_features = &device_features,
             .enabled_extension_count = 0,
         };
@@ -303,6 +344,7 @@ const HelloTriangleApplication = struct {
         self.device = try vki.createDevice(self.physical_device, &create_info, null);
         vkd = try DeviceDispatch.load(self.device, vki.dispatch.vkGetDeviceProcAddr);
         self.graphics_queue = vkd.getDeviceQueue(self.device, indices.graphics_family.?, 0);
+        self.present_queue = vkd.getDeviceQueue(self.device, indices.present_family.?, 0);
     }
 
     fn pickPhysicalDevice(self: *HelloTriangleApplication) !void {
@@ -329,7 +371,8 @@ const HelloTriangleApplication = struct {
         var best_score: i32 = 0;
         while (it.next()) |device| {
             if (device.value_ptr.* > best_score) {
-                if (try deviceIsSuitable(device.key_ptr.*)) {
+                // TODO: This check should be baked into rateDeviceSuitability()
+                if (try deviceIsSuitable(self, device.key_ptr.*)) {
                     best_score = device.value_ptr.*;
 
                     self.physical_device = device.key_ptr.*;
@@ -342,13 +385,14 @@ const HelloTriangleApplication = struct {
         }
     }
 
-    fn deviceIsSuitable(device: vk.PhysicalDevice) !bool {
-        const indices = try findQueueFamilies(device);
+    fn deviceIsSuitable(self: *HelloTriangleApplication, device: vk.PhysicalDevice) !bool {
+        const indices = try findQueueFamilies(self, device);
 
-        return indices.graphics_family != null;
+        return indices.graphics_family != null and
+            indices.present_family != null;
     }
 
-    fn findQueueFamilies(device: vk.PhysicalDevice) !QueueFamilyIndices {
+    fn findQueueFamilies(self: *HelloTriangleApplication, device: vk.PhysicalDevice) !QueueFamilyIndices {
         var indices: QueueFamilyIndices = .{};
 
         var queue_family_count: u32 = 0;
@@ -367,14 +411,24 @@ const HelloTriangleApplication = struct {
         for (queue_families) |family| {
             if (family.queue_flags.graphics_bit) {
                 indices.graphics_family = i;
-                break;
             }
 
-            // NOTE: The tutorial adds this check to break out if the graphics family was
-            // set, but this seems pointless when we can do it inside the assignment block?
-            //if (indices.graphics_family) |_| {
-            //    break;
-            //}
+            const present_support = try vki.getPhysicalDeviceSurfaceSupportKHR(
+                device,
+                i,
+                self.surface,
+            );
+
+            if (present_support == vk.TRUE) {
+                indices.present_family = i;
+            }
+
+            // NOTE: Now this check makes sense
+            if (indices.graphics_family != null and
+                indices.present_family != null)
+            {
+                break;
+            }
 
             i += 1;
         }
@@ -501,6 +555,7 @@ const HelloTriangleApplication = struct {
             );
         }
 
+        vki.destroySurfaceKHR(self.instance, self.surface, null);
         vki.destroyInstance(self.instance, null);
         // TODO: Why does produce an illegal instruction at address error?
         self.window.?.destroy();
