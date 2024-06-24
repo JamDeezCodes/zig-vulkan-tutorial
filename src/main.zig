@@ -352,6 +352,12 @@ const HelloTriangleApplication = struct {
         try self.createLogicalDevice();
         try self.createSwapChain();
         try self.createImageViews();
+        try self.createGraphicsPipeline();
+    }
+
+    fn createGraphicsPipeline(self: *HelloTriangleApplication) !void {
+        _ = self;
+        // TODO: Implement creation of graphics pipeline
     }
 
     fn createImageViews(self: *HelloTriangleApplication) !void {
