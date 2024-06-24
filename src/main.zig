@@ -68,8 +68,10 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
     .{
         .device_commands = .{
             .createSwapchainKHR = true,
+            .createImageView = true,
             .destroyDevice = true,
             .destroySwapchainKHR = true,
+            .destroyImageView = true,
             .getDeviceQueue = true,
             .getSwapchainImagesKHR = true,
         },
@@ -316,6 +318,7 @@ const HelloTriangleApplication = struct {
     swap_chain_images: []vk.Image = undefined,
     swap_chain_image_format: vk.Format = .undefined,
     swap_chain_extent: vk.Extent2D = undefined,
+    swap_chain_image_views: []vk.ImageView = undefined,
 
     pub fn run(self: *HelloTriangleApplication) !void {
         self.initWindow();
@@ -348,6 +351,34 @@ const HelloTriangleApplication = struct {
         try self.pickPhysicalDevice();
         try self.createLogicalDevice();
         try self.createSwapChain();
+        try self.createImageViews();
+    }
+
+    fn createImageViews(self: *HelloTriangleApplication) !void {
+        self.swap_chain_image_views = try allocator.alloc(vk.ImageView, self.swap_chain_images.len);
+
+        for (self.swap_chain_images, self.swap_chain_image_views) |image, *image_view| {
+            var create_info = vk.ImageViewCreateInfo{
+                .image = image,
+                .view_type = .@"2d",
+                .format = self.swap_chain_image_format,
+                .components = .{
+                    .r = .identity,
+                    .g = .identity,
+                    .b = .identity,
+                    .a = .identity,
+                },
+                .subresource_range = .{
+                    .aspect_mask = .{ .color_bit = true },
+                    .base_mip_level = 0,
+                    .level_count = 1,
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+            };
+
+            image_view.* = try vkd.createImageView(self.device, &create_info, null);
+        }
     }
 
     fn createSwapChain(self: *HelloTriangleApplication) !void {
@@ -728,6 +759,10 @@ const HelloTriangleApplication = struct {
     }
 
     fn cleanup(self: *HelloTriangleApplication) void {
+        for (self.swap_chain_image_views) |image_view| {
+            vkd.destroyImageView(self.device, image_view, null);
+        }
+
         vkd.destroySwapchainKHR(self.device, self.swap_chain, null);
         vkd.destroyDevice(self.device, null);
 
