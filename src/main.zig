@@ -4,6 +4,9 @@ const glfw = @import("mach-glfw");
 const vk = @import("vulkan");
 const mach = @import("mach");
 
+const vert = @embedFile("vert");
+const frag = @embedFile("frag");
+
 const assert = std.debug.assert;
 
 const vec4 = mach.math.vec4;
@@ -69,9 +72,11 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
         .device_commands = .{
             .createSwapchainKHR = true,
             .createImageView = true,
+            .createShaderModule = true,
             .destroyDevice = true,
             .destroySwapchainKHR = true,
             .destroyImageView = true,
+            .destroyShaderModule = true,
             .getDeviceQueue = true,
             .getSwapchainImagesKHR = true,
         },
@@ -356,8 +361,47 @@ const HelloTriangleApplication = struct {
     }
 
     fn createGraphicsPipeline(self: *HelloTriangleApplication) !void {
-        _ = self;
-        // TODO: Implement creation of graphics pipeline
+        //const vert_shader_module = try self.createShaderModule(vert);
+        const vert_shader_module = try vkd.createShaderModule(self.device, &.{
+            .code_size = vert.len,
+            .p_code = @ptrCast(@alignCast(vert)),
+        }, null);
+        defer vkd.destroyShaderModule(self.device, vert_shader_module, null);
+
+        //const frag_shader_module = try self.createShaderModule(frag);
+        const frag_shader_module = try vkd.createShaderModule(self.device, &.{
+            .code_size = frag.len,
+            .p_code = @ptrCast(@alignCast(frag)),
+        }, null);
+        defer vkd.destroyShaderModule(self.device, frag_shader_module, null);
+
+        const vert_shader_stage_info = vk.PipelineShaderStageCreateInfo{
+            .stage = .{ .vertex_bit = true },
+            .module = vert_shader_module,
+            .p_name = "main",
+        };
+
+        const frag_shader_stage_info = vk.PipelineShaderStageCreateInfo{
+            .stage = .{ .fragment_bit = true },
+            .module = frag_shader_module,
+            .p_name = "main",
+        };
+
+        const shader_stages = [_]vk.PipelineShaderStageCreateInfo{ vert_shader_stage_info, frag_shader_stage_info };
+        _ = shader_stages;
+    }
+
+    // NOTE: For some reason, use of this function produces an incorrect alignment error
+    // Is the implicit conversion to []const u8 somehow improper?
+    fn createShaderModule(self: *HelloTriangleApplication, code: []const u8) !vk.ShaderModule {
+        var create_info = vk.ShaderModuleCreateInfo{
+            .code_size = code.len,
+            .p_code = @ptrCast(@alignCast(code)),
+        };
+
+        const result = try vkd.createShaderModule(self.device, &create_info, null);
+
+        return result;
     }
 
     fn createImageViews(self: *HelloTriangleApplication) !void {

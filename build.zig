@@ -50,6 +50,24 @@ pub fn build(b: *std.Build) void {
     const vkzig_bindings = vkzig_dep.module("vulkan-zig");
     exe.root_module.addImport("vulkan", vkzig_bindings);
 
+    // Compile the vertex shader at build time so that it can be imported with '@embedFile'.
+    const compile_vert_shader = b.addSystemCommand(&.{"glslc"});
+    compile_vert_shader.addFileArg(b.path("shaders/shader.vert"));
+    compile_vert_shader.addArgs(&.{ "--target-env=vulkan1.2", "-o" });
+    const vert_spv = compile_vert_shader.addOutputFileArg("vert.spv");
+    exe.root_module.addAnonymousImport("vert", .{
+        .root_source_file = vert_spv,
+    });
+
+    // Ditto for the fragment shader.
+    const compile_frag_shader = b.addSystemCommand(&.{"glslc"});
+    compile_frag_shader.addFileArg(b.path("shaders/shader.frag"));
+    compile_frag_shader.addArgs(&.{ "--target-env=vulkan1.2", "-o" });
+    const frag_spv = compile_frag_shader.addOutputFileArg("frag.spv");
+    exe.root_module.addAnonymousImport("frag", .{
+        .root_source_file = frag_spv,
+    });
+
     // Add Mach to our library and executable
     const mach_dep = b.dependency("mach", .{
         .target = target,
