@@ -73,10 +73,12 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .createSwapchainKHR = true,
             .createImageView = true,
             .createShaderModule = true,
+            .createPipelineLayout = true,
             .destroyDevice = true,
             .destroySwapchainKHR = true,
             .destroyImageView = true,
             .destroyShaderModule = true,
+            .destroyPipelineLayout = true,
             .getDeviceQueue = true,
             .getSwapchainImagesKHR = true,
         },
@@ -324,6 +326,7 @@ const HelloTriangleApplication = struct {
     swap_chain_image_format: vk.Format = .undefined,
     swap_chain_extent: vk.Extent2D = undefined,
     swap_chain_image_views: []vk.ImageView = undefined,
+    pipeline_layout: vk.PipelineLayout = undefined,
 
     pub fn run(self: *HelloTriangleApplication) !void {
         self.initWindow();
@@ -388,7 +391,107 @@ const HelloTriangleApplication = struct {
         };
 
         const shader_stages = [_]vk.PipelineShaderStageCreateInfo{ vert_shader_stage_info, frag_shader_stage_info };
+
+        const dynamic_states = [_]vk.DynamicState{ .viewport, .scissor };
+        const dynamic_state = vk.PipelineDynamicStateCreateInfo{
+            .dynamic_state_count = dynamic_states.len,
+            .p_dynamic_states = &dynamic_states,
+        };
+
+        const vertex_input_info = vk.PipelineVertexInputStateCreateInfo{
+            .vertex_binding_description_count = 0,
+            .p_vertex_binding_descriptions = null,
+            .vertex_attribute_description_count = 0,
+            .p_vertex_attribute_descriptions = null,
+        };
+
+        const input_assembly = vk.PipelineInputAssemblyStateCreateInfo{
+            .topology = .triangle_list,
+            .primitive_restart_enable = vk.FALSE,
+        };
+
+        const viewport = vk.Viewport{
+            .x = 0,
+            .y = 0,
+            .width = @floatFromInt(self.swap_chain_extent.width),
+            .height = @floatFromInt(self.swap_chain_extent.height),
+            .min_depth = 0,
+            .max_depth = 1,
+        };
+
+        const scissor = vk.Rect2D{
+            .offset = .{ .x = 0, .y = 0 },
+            .extent = self.swap_chain_extent,
+        };
+
+        const viewport_state = vk.PipelineViewportStateCreateInfo{
+            .viewport_count = 1,
+            .p_viewports = &.{viewport},
+            .scissor_count = 1,
+            .p_scissors = &.{scissor},
+        };
+
+        const rasterizer = vk.PipelineRasterizationStateCreateInfo{
+            .depth_clamp_enable = vk.FALSE,
+            .rasterizer_discard_enable = vk.FALSE,
+            .polygon_mode = .fill,
+            .line_width = 1,
+            .cull_mode = .{ .back_bit = true },
+            .front_face = .clockwise,
+            .depth_bias_enable = vk.FALSE,
+            .depth_bias_constant_factor = 0,
+            .depth_bias_clamp = 0,
+            .depth_bias_slope_factor = 0,
+        };
+
+        const multisampling = vk.PipelineMultisampleStateCreateInfo{
+            .sample_shading_enable = vk.FALSE,
+            .rasterization_samples = .{ .@"1_bit" = true },
+            .min_sample_shading = 1,
+            .p_sample_mask = null,
+            .alpha_to_coverage_enable = vk.FALSE,
+            .alpha_to_one_enable = vk.FALSE,
+        };
+
+        const color_blend_attachment = vk.PipelineColorBlendAttachmentState{
+            .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+            //.blend_enable = vk.FALSE,
+            //.src_color_blend_factor = .one,
+            //.dst_color_blend_factor = .zero,
+            .blend_enable = vk.TRUE,
+            .src_color_blend_factor = .src_alpha,
+            .dst_color_blend_factor = .one_minus_src_alpha,
+            .color_blend_op = .add,
+            .src_alpha_blend_factor = .one,
+            .dst_alpha_blend_factor = .zero,
+            .alpha_blend_op = .add,
+        };
+
+        const color_blending = vk.PipelineColorBlendStateCreateInfo{
+            .logic_op_enable = vk.FALSE,
+            .logic_op = .copy,
+            .attachment_count = 1,
+            .p_attachments = &.{color_blend_attachment},
+            .blend_constants = .{ 0, 0, 0, 0 },
+        };
+
+        const pipeline_layout_info = vk.PipelineLayoutCreateInfo{
+            .set_layout_count = 0,
+            .p_set_layouts = null,
+            .push_constant_range_count = 0,
+            .p_push_constant_ranges = null,
+        };
+
+        self.pipeline_layout = try vkd.createPipelineLayout(self.device, &pipeline_layout_info, null);
+
         _ = shader_stages;
+        _ = dynamic_state;
+        _ = vertex_input_info;
+        _ = input_assembly;
+        _ = viewport_state;
+        _ = rasterizer;
+        _ = multisampling;
+        _ = color_blending;
     }
 
     // NOTE: For some reason, use of this function produces an incorrect alignment error
@@ -495,6 +598,7 @@ const HelloTriangleApplication = struct {
     fn createLogicalDevice(self: *HelloTriangleApplication) !void {
         const indices = try findQueueFamilies(self, self.physical_device);
 
+        // TODO: do not use both if the graphics and present indices aren't actually unique
         const unique_queue_families = [_]u32{ indices.graphics_family.?, indices.present_family.? };
         var queue_create_infos = try allocator.alloc(vk.DeviceQueueCreateInfo, unique_queue_families.len);
         defer allocator.free(queue_create_infos);
@@ -503,6 +607,7 @@ const HelloTriangleApplication = struct {
         // NOTE: It appears that in newer versions of Vulkan, using the same queue family index across
         // multiple create infos would be regarded as bad practice, and the following Validation Error(s)
         // are produced when doing so to point this out:
+        // ADDENDUM: Using the same index multiple times causes the app to fail altogether, confirming the above
         //
         // Validation Error: [ VUID-VkDeviceCreateInfo-queueFamilyIndex-02802 ] Object 0: handle = 0x6000026d5880, type = VK_OBJECT_TYPE_PHYSICAL_DEVICE;
         //      | MessageID = 0x29498778 | vkCreateDevice(): pCreateInfo->pQueueCreateInfos[1].queueFamilyIndex (0) is not unique and was also used in
@@ -809,6 +914,8 @@ const HelloTriangleApplication = struct {
     }
 
     fn cleanup(self: *HelloTriangleApplication) void {
+        vkd.destroyPipelineLayout(self.device, self.pipeline_layout, null);
+
         for (self.swap_chain_image_views) |image_view| {
             vkd.destroyImageView(self.device, image_view, null);
         }
