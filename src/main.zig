@@ -75,12 +75,14 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .createShaderModule = true,
             .createRenderPass = true,
             .createPipelineLayout = true,
+            .createGraphicsPipelines = true,
             .destroyDevice = true,
             .destroySwapchainKHR = true,
             .destroyImageView = true,
             .destroyShaderModule = true,
             .destroyPipelineLayout = true,
             .destroyRenderPass = true,
+            .destroyPipeline = true,
             .getDeviceQueue = true,
             .getSwapchainImagesKHR = true,
         },
@@ -330,6 +332,7 @@ const HelloTriangleApplication = struct {
     swap_chain_image_views: []vk.ImageView = undefined,
     render_pass: vk.RenderPass = undefined,
     pipeline_layout: vk.PipelineLayout = undefined,
+    graphics_pipeline: vk.Pipeline = undefined,
 
     pub fn run(self: *HelloTriangleApplication) !void {
         self.initWindow();
@@ -363,8 +366,8 @@ const HelloTriangleApplication = struct {
         try self.createLogicalDevice();
         try self.createSwapChain();
         try self.createImageViews();
-        try self.createGraphicsPipeline();
         try self.createRenderPass();
+        try self.createGraphicsPipeline();
     }
 
     fn createRenderPass(self: *HelloTriangleApplication) !void {
@@ -521,14 +524,32 @@ const HelloTriangleApplication = struct {
 
         self.pipeline_layout = try vkd.createPipelineLayout(self.device, &pipeline_layout_info, null);
 
-        _ = shader_stages;
-        _ = dynamic_state;
-        _ = vertex_input_info;
-        _ = input_assembly;
-        _ = viewport_state;
-        _ = rasterizer;
-        _ = multisampling;
-        _ = color_blending;
+        const pipeline_info = vk.GraphicsPipelineCreateInfo{
+            .stage_count = 2,
+            .p_stages = &shader_stages,
+            .p_vertex_input_state = &vertex_input_info,
+            .p_input_assembly_state = &input_assembly,
+            .p_viewport_state = &viewport_state,
+            .p_rasterization_state = &rasterizer,
+            .p_multisample_state = &multisampling,
+            .p_depth_stencil_state = null,
+            .p_color_blend_state = &color_blending,
+            .p_dynamic_state = &dynamic_state,
+            .layout = self.pipeline_layout,
+            .render_pass = self.render_pass,
+            .subpass = 0,
+            .base_pipeline_handle = .null_handle,
+            .base_pipeline_index = 1,
+        };
+
+        _ = try vkd.createGraphicsPipelines(
+            self.device,
+            .null_handle,
+            1,
+            &.{pipeline_info},
+            null,
+            @ptrCast(&self.graphics_pipeline),
+        );
     }
 
     // NOTE: For some reason, use of this function produces an incorrect alignment error
@@ -951,6 +972,7 @@ const HelloTriangleApplication = struct {
     }
 
     fn cleanup(self: *HelloTriangleApplication) void {
+        vkd.destroyPipeline(self.device, self.graphics_pipeline, null);
         vkd.destroyPipelineLayout(self.device, self.pipeline_layout, null);
         vkd.destroyRenderPass(self.device, self.render_pass, null);
 
