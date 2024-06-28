@@ -76,6 +76,7 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .createRenderPass = true,
             .createPipelineLayout = true,
             .createGraphicsPipelines = true,
+            .createFramebuffer = true,
             .destroyDevice = true,
             .destroySwapchainKHR = true,
             .destroyImageView = true,
@@ -83,6 +84,7 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .destroyPipelineLayout = true,
             .destroyRenderPass = true,
             .destroyPipeline = true,
+            .destroyFramebuffer = true,
             .getDeviceQueue = true,
             .getSwapchainImagesKHR = true,
         },
@@ -333,6 +335,7 @@ const HelloTriangleApplication = struct {
     render_pass: vk.RenderPass = undefined,
     pipeline_layout: vk.PipelineLayout = undefined,
     graphics_pipeline: vk.Pipeline = undefined,
+    swap_chain_framebuffers: []vk.Framebuffer = undefined,
 
     pub fn run(self: *HelloTriangleApplication) !void {
         self.initWindow();
@@ -368,6 +371,24 @@ const HelloTriangleApplication = struct {
         try self.createImageViews();
         try self.createRenderPass();
         try self.createGraphicsPipeline();
+        try self.createFrameBuffers();
+    }
+
+    fn createFrameBuffers(self: *HelloTriangleApplication) !void {
+        self.swap_chain_framebuffers = try allocator.alloc(vk.Framebuffer, self.swap_chain_image_views.len);
+
+        for (self.swap_chain_image_views, self.swap_chain_framebuffers) |image_view, *framebuffer| {
+            const framebuffer_info = vk.FramebufferCreateInfo{
+                .render_pass = self.render_pass,
+                .attachment_count = 1,
+                .p_attachments = &.{image_view},
+                .width = self.swap_chain_extent.width,
+                .height = self.swap_chain_extent.height,
+                .layers = 1,
+            };
+
+            framebuffer.* = try vkd.createFramebuffer(self.device, &framebuffer_info, null);
+        }
     }
 
     fn createRenderPass(self: *HelloTriangleApplication) !void {
@@ -972,6 +993,10 @@ const HelloTriangleApplication = struct {
     }
 
     fn cleanup(self: *HelloTriangleApplication) void {
+        for (self.swap_chain_framebuffers) |framebuffer| {
+            vkd.destroyFramebuffer(self.device, framebuffer, null);
+        }
+
         vkd.destroyPipeline(self.device, self.graphics_pipeline, null);
         vkd.destroyPipelineLayout(self.device, self.pipeline_layout, null);
         vkd.destroyRenderPass(self.device, self.render_pass, null);
