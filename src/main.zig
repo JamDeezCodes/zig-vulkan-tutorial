@@ -70,6 +70,14 @@ const InstanceDispatch = vk.InstanceWrapper(&.{
 const DeviceDispatch = vk.DeviceWrapper(&.{
     .{
         .device_commands = .{
+            .allocateCommandBuffers = true,
+            .beginCommandBuffer = true,
+            .cmdBindPipeline = true,
+            .cmdBeginRenderPass = true,
+            .cmdSetViewport = true,
+            .cmdSetScissor = true,
+            .cmdDraw = true,
+            .cmdEndRenderPass = true,
             .createSwapchainKHR = true,
             .createImageView = true,
             .createShaderModule = true,
@@ -77,6 +85,7 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .createPipelineLayout = true,
             .createGraphicsPipelines = true,
             .createFramebuffer = true,
+            .createCommandPool = true,
             .destroyDevice = true,
             .destroySwapchainKHR = true,
             .destroyImageView = true,
@@ -85,6 +94,8 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .destroyRenderPass = true,
             .destroyPipeline = true,
             .destroyFramebuffer = true,
+            .destroyCommandPool = true,
+            .endCommandBuffer = true,
             .getDeviceQueue = true,
             .getSwapchainImagesKHR = true,
         },
@@ -94,6 +105,7 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
 const QueueFamilyIndices = struct {
     graphics_family: ?u32 = null,
     present_family: ?u32 = null,
+    slice: []u32 = undefined,
 };
 
 const SwapChainSupportDetails = struct {
@@ -332,10 +344,12 @@ const HelloTriangleApplication = struct {
     swap_chain_image_format: vk.Format = .undefined,
     swap_chain_extent: vk.Extent2D = undefined,
     swap_chain_image_views: []vk.ImageView = undefined,
-    render_pass: vk.RenderPass = undefined,
-    pipeline_layout: vk.PipelineLayout = undefined,
-    graphics_pipeline: vk.Pipeline = undefined,
+    render_pass: vk.RenderPass = .null_handle,
+    pipeline_layout: vk.PipelineLayout = .null_handle,
+    graphics_pipeline: vk.Pipeline = .null_handle,
     swap_chain_framebuffers: []vk.Framebuffer = undefined,
+    command_pool: vk.CommandPool = .null_handle,
+    command_buffer: vk.CommandBuffer = .null_handle,
 
     pub fn run(self: *HelloTriangleApplication) !void {
         self.initWindow();
@@ -372,6 +386,74 @@ const HelloTriangleApplication = struct {
         try self.createRenderPass();
         try self.createGraphicsPipeline();
         try self.createFrameBuffers();
+        try self.createCommandPool();
+        try self.createCommandBuffer();
+    }
+
+    fn recordCommandBuffer(
+        self: *HelloTriangleApplication,
+        command_buffer: vk.CommandBuffer,
+        image_index: u32,
+    ) !void {
+        var begin_info = vk.CommandBufferBeginInfo{
+            .flags = 0,
+            .p_inheritance_info = null,
+        };
+
+        _ = try vkd.beginCommandBuffer(command_buffer, &begin_info);
+
+        var render_pass_info = vk.RenderPassBeginInfo{
+            .render_pass = self.render_pass,
+            .framebuffer = self.swap_chain_framebuffers[image_index],
+            .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = self.swap_chain_extent },
+            .clear_value_count = 1,
+            .p_clear_values = @ptrCast(&vk.ClearValue{ .color = .{ .float_32 = .{ 0, 0, 0, 1 } } }),
+        };
+
+        _ = try vkd.cmdBeginRenderPass(self.command_buffer, &render_pass_info, .@"inline");
+        _ = try vkd.cmdBindPipeline(self.command_buffer, .graphics, self.graphics_pipeline);
+
+        const viewport = vk.Viewport{
+            .x = 0,
+            .y = 0,
+            .width = @floatFromInt(self.swap_chain_extent.width),
+            .height = @floatFromInt(self.swap_chain_extent.height),
+            .min_depth = 0,
+            .max_depth = 1,
+        };
+
+        vkd.cmdSetViewport(self.command_buffer, 0, 1, @ptrCast(&viewport));
+
+        const scissor = vk.Rect2D{
+            .offset = .{ .x = 0, .y = 0 },
+            .extent = self.swap_chain_extent,
+        };
+
+        vkd.cmdSetScissor(self.command_buffer, 0, 1, @ptrCast(&scissor));
+        vkd.cmdDraw(self.command_buffer, 3, 1, 0, 0);
+        vkd.cmdEndRenderPass(self.command_buffer);
+        _ = try vkd.endCommandBuffer(self.command_buffer);
+    }
+
+    fn createCommandBuffer(self: *HelloTriangleApplication) !void {
+        var alloc_info = vk.CommandBufferAllocateInfo{
+            .command_pool = self.command_pool,
+            .level = .primary,
+            .command_buffer_count = 1,
+        };
+
+        _ = try vkd.allocateCommandBuffers(self.device, &alloc_info, @ptrCast(&self.command_buffer));
+    }
+
+    fn createCommandPool(self: *HelloTriangleApplication) !void {
+        const queue_family_indices = try self.findQueueFamilies(self.physical_device);
+
+        var pool_info = vk.CommandPoolCreateInfo{
+            .flags = .{ .reset_command_buffer_bit = true },
+            .queue_family_index = queue_family_indices.graphics_family.?,
+        };
+
+        self.command_pool = try vkd.createCommandPool(self.device, &pool_info, null);
     }
 
     fn createFrameBuffers(self: *HelloTriangleApplication) !void {
@@ -643,12 +725,12 @@ const HelloTriangleApplication = struct {
         };
 
         const indices = try findQueueFamilies(self, self.physical_device);
-        const queue_family_indices = [_]u32{ indices.graphics_family.?, indices.present_family.? };
+        defer allocator.free(indices.slice);
 
         if (indices.graphics_family.? != indices.present_family.?) {
             create_info.image_sharing_mode = .concurrent;
             create_info.queue_family_index_count = 2;
-            create_info.p_queue_family_indices = &queue_family_indices;
+            create_info.p_queue_family_indices = @ptrCast(indices.slice.ptr);
         } else {
             create_info.image_sharing_mode = .exclusive;
             create_info.queue_family_index_count = 0;
@@ -676,33 +758,13 @@ const HelloTriangleApplication = struct {
 
     fn createLogicalDevice(self: *HelloTriangleApplication) !void {
         const indices = try findQueueFamilies(self, self.physical_device);
+        defer allocator.free(indices.slice);
 
-        // TODO: do not use both if the graphics and present indices aren't actually unique
-        const unique_queue_families = [_]u32{ indices.graphics_family.?, indices.present_family.? };
-        var queue_create_infos = try allocator.alloc(vk.DeviceQueueCreateInfo, unique_queue_families.len);
+        var queue_create_infos = try allocator.alloc(vk.DeviceQueueCreateInfo, indices.slice.len);
         defer allocator.free(queue_create_infos);
         const queue_priority: [1]f32 = .{1};
 
-        // NOTE: It appears that in newer versions of Vulkan, using the same queue family index across
-        // multiple create infos would be regarded as bad practice, and the following Validation Error(s)
-        // are produced when doing so to point this out:
-        // ADDENDUM: Using the same index multiple times causes the app to fail altogether, confirming the above
-        //
-        // Validation Error: [ VUID-VkDeviceCreateInfo-queueFamilyIndex-02802 ] Object 0: handle = 0x6000026d5880, type = VK_OBJECT_TYPE_PHYSICAL_DEVICE;
-        //      | MessageID = 0x29498778 | vkCreateDevice(): pCreateInfo->pQueueCreateInfos[1].queueFamilyIndex (0) is not unique and was also used in
-        //      pCreateInfo->pQueueCreateInfos[0]. The Vulkan spec states: The queueFamilyIndex member of each element of pQueueCreateInfos must be unique
-        //      within pQueueCreateInfos , except that two members can share the same queueFamilyIndex if one describes protected-capable queues and one
-        //      describes queues that are not protected-capable
-        //      (https://vulkan.lunarg.com/doc/view/1.3.283.0/mac/1.3-extensions/vkspec.html#VUID-VkDeviceCreateInfo-queueFamilyIndex-02802)
-        //
-        // Validation Error: [ VUID-VkDeviceCreateInfo-pQueueCreateInfos-06755 ] Object 0: handle = 0x6000026d5880, type = VK_OBJECT_TYPE_PHYSICAL_DEVICE;
-        //      | MessageID = 0x4180bcf6 | vkCreateDevice(): pCreateInfo Total queue count requested from queue family index 0 is 2, which is greater than
-        //      queue count available in the queue family (1). The Vulkan spec states: If multiple elements of pQueueCreateInfos share the same queueFamilyIndex,
-        //      the sum of their queueCount members must be less than or equal to the queueCount member of the VkQueueFamilyProperties structure, as returned
-        //      by vkGetPhysicalDeviceQueueFamilyProperties in the pQueueFamilyProperties[queueFamilyIndex]
-        //      (https://vulkan.lunarg.com/doc/view/1.3.283.0/mac/1.3-extensions/vkspec.html#VUID-VkDeviceCreateInfo-pQueueCreateInfos-06755)
-
-        for (unique_queue_families, 0..) |queue_family, i| {
+        for (indices.slice, 0..) |queue_family, i| {
             queue_create_infos.ptr[i] = .{
                 .queue_family_index = queue_family,
                 .queue_count = 1,
@@ -798,6 +860,7 @@ const HelloTriangleApplication = struct {
 
     fn deviceIsSuitable(self: *HelloTriangleApplication, device: vk.PhysicalDevice) !bool {
         const indices = try findQueueFamilies(self, device);
+        defer allocator.free(indices.slice);
 
         const extensions_supported = try checkDeviceExtensionSupport(device);
 
@@ -871,7 +934,7 @@ const HelloTriangleApplication = struct {
                 indices.present_family = i;
             }
 
-            // NOTE: Now this check makes sense
+            // TODO: Determine the best way to prevent reusing the same index for each family
             if (indices.graphics_family != null and
                 indices.present_family != null)
             {
@@ -880,6 +943,41 @@ const HelloTriangleApplication = struct {
 
             i += 1;
         }
+
+        // NOTE: It appears that in newer versions of Vulkan, using the same queue family index across
+        // multiple create infos would be regarded as bad practice, and the following Validation Error(s)
+        // are produced when doing so to point this out:
+        // ADDENDUM: Using the same index multiple times causes the app to fail altogether outside of
+        // macos (MoltenVK), confirming the above
+        //
+        // Validation Error: [ VUID-VkDeviceCreateInfo-queueFamilyIndex-02802 ] Object 0: handle = 0x6000026d5880, type = VK_OBJECT_TYPE_PHYSICAL_DEVICE;
+        //      | MessageID = 0x29498778 | vkCreateDevice(): pCreateInfo->pQueueCreateInfos[1].queueFamilyIndex (0) is not unique and was also used in
+        //      pCreateInfo->pQueueCreateInfos[0]. The Vulkan spec states: The queueFamilyIndex member of each element of pQueueCreateInfos must be unique
+        //      within pQueueCreateInfos , except that two members can share the same queueFamilyIndex if one describes protected-capable queues and one
+        //      describes queues that are not protected-capable
+        //      (https://vulkan.lunarg.com/doc/view/1.3.283.0/mac/1.3-extensions/vkspec.html#VUID-VkDeviceCreateInfo-queueFamilyIndex-02802)
+        //
+        // Validation Error: [ VUID-VkDeviceCreateInfo-pQueueCreateInfos-06755 ] Object 0: handle = 0x6000026d5880, type = VK_OBJECT_TYPE_PHYSICAL_DEVICE;
+        //      | MessageID = 0x4180bcf6 | vkCreateDevice(): pCreateInfo Total queue count requested from queue family index 0 is 2, which is greater than
+        //      queue count available in the queue family (1). The Vulkan spec states: If multiple elements of pQueueCreateInfos share the same queueFamilyIndex,
+        //      the sum of their queueCount members must be less than or equal to the queueCount member of the VkQueueFamilyProperties structure, as returned
+        //      by vkGetPhysicalDeviceQueueFamilyProperties in the pQueueFamilyProperties[queueFamilyIndex]
+        //      (https://vulkan.lunarg.com/doc/view/1.3.283.0/mac/1.3-extensions/vkspec.html#VUID-VkDeviceCreateInfo-pQueueCreateInfos-06755)
+        //
+        // Here we store a slice of one or more unique indices for later use, ensuring we do not encounter
+        // the above validation errors
+        if (indices.graphics_family) |graphics_family| {
+            if (indices.present_family) |present_family| {
+                if (graphics_family == present_family) {
+                    indices.slice = try allocator.alloc(u32, 1);
+                    indices.slice[0] = graphics_family;
+                } else {
+                    indices.slice = try allocator.alloc(u32, 2);
+                    indices.slice[0] = graphics_family;
+                    indices.slice[1] = present_family;
+                }
+            } else unreachable;
+        } else unreachable;
 
         return indices;
     }
@@ -993,6 +1091,8 @@ const HelloTriangleApplication = struct {
     }
 
     fn cleanup(self: *HelloTriangleApplication) void {
+        vkd.destroyCommandPool(self.device, self.command_pool, null);
+
         for (self.swap_chain_framebuffers) |framebuffer| {
             vkd.destroyFramebuffer(self.device, framebuffer, null);
         }
