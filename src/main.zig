@@ -70,6 +70,7 @@ const InstanceDispatch = vk.InstanceWrapper(&.{
 const DeviceDispatch = vk.DeviceWrapper(&.{
     .{
         .device_commands = .{
+            .acquireNextImageKHR = true,
             .allocateCommandBuffers = true,
             .beginCommandBuffer = true,
             .cmdBindPipeline = true,
@@ -86,6 +87,8 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .createGraphicsPipelines = true,
             .createFramebuffer = true,
             .createCommandPool = true,
+            .createSemaphore = true,
+            .createFence = true,
             .destroyDevice = true,
             .destroySwapchainKHR = true,
             .destroyImageView = true,
@@ -95,9 +98,17 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .destroyPipeline = true,
             .destroyFramebuffer = true,
             .destroyCommandPool = true,
+            .destroySemaphore = true,
+            .destroyFence = true,
+            .deviceWaitIdle = true,
             .endCommandBuffer = true,
             .getDeviceQueue = true,
             .getSwapchainImagesKHR = true,
+            .queueSubmit = true,
+            .queuePresentKHR = true,
+            .resetFences = true,
+            .resetCommandBuffer = true,
+            .waitForFences = true,
         },
     },
 });
@@ -350,12 +361,15 @@ const HelloTriangleApplication = struct {
     swap_chain_framebuffers: []vk.Framebuffer = undefined,
     command_pool: vk.CommandPool = .null_handle,
     command_buffer: vk.CommandBuffer = .null_handle,
+    image_available_semaphore: vk.Semaphore = .null_handle,
+    render_finished_semaphore: vk.Semaphore = .null_handle,
+    in_flight_fence: vk.Fence = .null_handle,
 
     pub fn run(self: *HelloTriangleApplication) !void {
         self.initWindow();
         try self.initVulkan();
         defer self.cleanup();
-        self.mainLoop();
+        try self.mainLoop();
     }
 
     fn initWindow(self: *HelloTriangleApplication) void {
@@ -388,6 +402,19 @@ const HelloTriangleApplication = struct {
         try self.createFrameBuffers();
         try self.createCommandPool();
         try self.createCommandBuffer();
+        try self.createSyncObjects();
+    }
+
+    fn createSyncObjects(self: *HelloTriangleApplication) !void {
+        var semaphore_info = vk.SemaphoreCreateInfo{};
+
+        var fence_info = vk.FenceCreateInfo{
+            .flags = .{ .signaled_bit = true },
+        };
+
+        self.image_available_semaphore = try vkd.createSemaphore(self.device, &semaphore_info, null);
+        self.render_finished_semaphore = try vkd.createSemaphore(self.device, &semaphore_info, null);
+        self.in_flight_fence = try vkd.createFence(self.device, &fence_info, null);
     }
 
     fn recordCommandBuffer(
@@ -396,7 +423,7 @@ const HelloTriangleApplication = struct {
         image_index: u32,
     ) !void {
         var begin_info = vk.CommandBufferBeginInfo{
-            .flags = 0,
+            .flags = .{},
             .p_inheritance_info = null,
         };
 
@@ -410,8 +437,8 @@ const HelloTriangleApplication = struct {
             .p_clear_values = @ptrCast(&vk.ClearValue{ .color = .{ .float_32 = .{ 0, 0, 0, 1 } } }),
         };
 
-        _ = try vkd.cmdBeginRenderPass(self.command_buffer, &render_pass_info, .@"inline");
-        _ = try vkd.cmdBindPipeline(self.command_buffer, .graphics, self.graphics_pipeline);
+        vkd.cmdBeginRenderPass(self.command_buffer, &render_pass_info, .@"inline");
+        vkd.cmdBindPipeline(self.command_buffer, .graphics, self.graphics_pipeline);
 
         const viewport = vk.Viewport{
             .x = 0,
@@ -496,11 +523,22 @@ const HelloTriangleApplication = struct {
             .p_color_attachments = &.{color_attachment_ref},
         };
 
+        const dependency = vk.SubpassDependency{
+            .src_subpass = vk.SUBPASS_EXTERNAL,
+            .dst_subpass = 0,
+            .src_stage_mask = .{ .color_attachment_output_bit = true },
+            .src_access_mask = .{},
+            .dst_stage_mask = .{ .color_attachment_output_bit = true },
+            .dst_access_mask = .{ .color_attachment_write_bit = true },
+        };
+
         const render_pass_info = vk.RenderPassCreateInfo{
             .attachment_count = 1,
             .p_attachments = &.{color_attachment},
             .subpass_count = 1,
             .p_subpasses = &.{subpass},
+            .dependency_count = 1,
+            .p_dependencies = @ptrCast(&dependency),
         };
 
         self.render_pass = try vkd.createRenderPass(self.device, &render_pass_info, null);
@@ -1084,13 +1122,62 @@ const HelloTriangleApplication = struct {
         vki = try InstanceDispatch.load(self.instance, vkb.dispatch.vkGetInstanceProcAddr);
     }
 
-    fn mainLoop(self: *HelloTriangleApplication) void {
+    fn mainLoop(self: *HelloTriangleApplication) !void {
         while (!self.window.?.shouldClose()) {
             glfw.pollEvents();
+            try self.drawFrame();
         }
+
+        try vkd.deviceWaitIdle(self.device);
+    }
+
+    fn drawFrame(self: *HelloTriangleApplication) !void {
+        _ = try vkd.waitForFences(self.device, 1, @ptrCast(&self.in_flight_fence), vk.TRUE, std.math.maxInt(u64));
+        _ = try vkd.resetFences(self.device, 1, @ptrCast(&self.in_flight_fence));
+
+        const image_result = try vkd.acquireNextImageKHR(
+            self.device,
+            self.swap_chain,
+            std.math.maxInt(u64),
+            self.image_available_semaphore,
+            .null_handle,
+        );
+
+        _ = try vkd.resetCommandBuffer(self.command_buffer, .{});
+        _ = try self.recordCommandBuffer(self.command_buffer, image_result.image_index);
+
+        const wait_semaphores = [_]vk.Semaphore{self.image_available_semaphore};
+        const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
+        const signal_semaphores = [_]vk.Semaphore{self.render_finished_semaphore};
+        var submit_info = vk.SubmitInfo{
+            .wait_semaphore_count = 1,
+            .p_wait_semaphores = &wait_semaphores,
+            .p_wait_dst_stage_mask = &wait_stages,
+            .command_buffer_count = 1,
+            .p_command_buffers = @ptrCast(&self.command_buffer),
+            .signal_semaphore_count = 1,
+            .p_signal_semaphores = &signal_semaphores,
+        };
+
+        try vkd.queueSubmit(self.graphics_queue, 1, @ptrCast(&submit_info), self.in_flight_fence);
+
+        const swap_chains = [_]vk.SwapchainKHR{self.swap_chain};
+        const present_info = vk.PresentInfoKHR{
+            .wait_semaphore_count = 1,
+            .p_wait_semaphores = &signal_semaphores,
+            .swapchain_count = 1,
+            .p_swapchains = &swap_chains,
+            .p_image_indices = @ptrCast(&image_result.image_index),
+            .p_results = null,
+        };
+
+        _ = try vkd.queuePresentKHR(self.present_queue, &present_info);
     }
 
     fn cleanup(self: *HelloTriangleApplication) void {
+        vkd.destroySemaphore(self.device, self.image_available_semaphore, null);
+        vkd.destroySemaphore(self.device, self.render_finished_semaphore, null);
+        vkd.destroyFence(self.device, self.in_flight_fence, null);
         vkd.destroyCommandPool(self.device, self.command_pool, null);
 
         for (self.swap_chain_framebuffers) |framebuffer| {
