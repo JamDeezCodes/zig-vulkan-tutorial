@@ -16,6 +16,8 @@ const Mat4x4 = mach.math.Mat4x4;
 
 const width = 800;
 const height = 600;
+const max_frames_in_flight = 2;
+var current_frame: u32 = 0;
 
 const validation_layers = [_][*:0]const u8{
     "VK_LAYER_KHRONOS_validation",
@@ -360,10 +362,10 @@ const HelloTriangleApplication = struct {
     graphics_pipeline: vk.Pipeline = .null_handle,
     swap_chain_framebuffers: []vk.Framebuffer = undefined,
     command_pool: vk.CommandPool = .null_handle,
-    command_buffer: vk.CommandBuffer = .null_handle,
-    image_available_semaphore: vk.Semaphore = .null_handle,
-    render_finished_semaphore: vk.Semaphore = .null_handle,
-    in_flight_fence: vk.Fence = .null_handle,
+    command_buffers: []vk.CommandBuffer = undefined,
+    image_available_semaphores: []vk.Semaphore = undefined,
+    render_finished_semaphores: []vk.Semaphore = undefined,
+    in_flight_fences: []vk.Fence = undefined,
 
     pub fn run(self: *HelloTriangleApplication) !void {
         self.initWindow();
@@ -389,6 +391,9 @@ const HelloTriangleApplication = struct {
         self.window = &window;
     }
 
+    // TODO: Consider a procedural refactoring of this struct and all its member functions, many of which
+    // do not seem to see any reuse. Maybe a larger app would see some of these functions being called more
+    // than once?
     fn initVulkan(self: *HelloTriangleApplication) !void {
         try self.createInstance();
         self.setupDebugMessenger();
@@ -401,20 +406,26 @@ const HelloTriangleApplication = struct {
         try self.createGraphicsPipeline();
         try self.createFrameBuffers();
         try self.createCommandPool();
-        try self.createCommandBuffer();
+        try self.createCommandBuffers();
         try self.createSyncObjects();
     }
 
     fn createSyncObjects(self: *HelloTriangleApplication) !void {
+        self.image_available_semaphores = try allocator.alloc(vk.Semaphore, max_frames_in_flight);
+        self.render_finished_semaphores = try allocator.alloc(vk.Semaphore, max_frames_in_flight);
+        self.in_flight_fences = try allocator.alloc(vk.Fence, max_frames_in_flight);
+
         var semaphore_info = vk.SemaphoreCreateInfo{};
 
         var fence_info = vk.FenceCreateInfo{
             .flags = .{ .signaled_bit = true },
         };
 
-        self.image_available_semaphore = try vkd.createSemaphore(self.device, &semaphore_info, null);
-        self.render_finished_semaphore = try vkd.createSemaphore(self.device, &semaphore_info, null);
-        self.in_flight_fence = try vkd.createFence(self.device, &fence_info, null);
+        for (0..max_frames_in_flight) |i| {
+            self.image_available_semaphores[i] = try vkd.createSemaphore(self.device, &semaphore_info, null);
+            self.render_finished_semaphores[i] = try vkd.createSemaphore(self.device, &semaphore_info, null);
+            self.in_flight_fences[i] = try vkd.createFence(self.device, &fence_info, null);
+        }
     }
 
     fn recordCommandBuffer(
@@ -437,8 +448,8 @@ const HelloTriangleApplication = struct {
             .p_clear_values = @ptrCast(&vk.ClearValue{ .color = .{ .float_32 = .{ 0, 0, 0, 1 } } }),
         };
 
-        vkd.cmdBeginRenderPass(self.command_buffer, &render_pass_info, .@"inline");
-        vkd.cmdBindPipeline(self.command_buffer, .graphics, self.graphics_pipeline);
+        vkd.cmdBeginRenderPass(command_buffer, &render_pass_info, .@"inline");
+        vkd.cmdBindPipeline(command_buffer, .graphics, self.graphics_pipeline);
 
         const viewport = vk.Viewport{
             .x = 0,
@@ -449,27 +460,29 @@ const HelloTriangleApplication = struct {
             .max_depth = 1,
         };
 
-        vkd.cmdSetViewport(self.command_buffer, 0, 1, @ptrCast(&viewport));
+        vkd.cmdSetViewport(command_buffer, 0, 1, @ptrCast(&viewport));
 
         const scissor = vk.Rect2D{
             .offset = .{ .x = 0, .y = 0 },
             .extent = self.swap_chain_extent,
         };
 
-        vkd.cmdSetScissor(self.command_buffer, 0, 1, @ptrCast(&scissor));
-        vkd.cmdDraw(self.command_buffer, 3, 1, 0, 0);
-        vkd.cmdEndRenderPass(self.command_buffer);
-        _ = try vkd.endCommandBuffer(self.command_buffer);
+        vkd.cmdSetScissor(command_buffer, 0, 1, @ptrCast(&scissor));
+        vkd.cmdDraw(command_buffer, 3, 1, 0, 0);
+        vkd.cmdEndRenderPass(command_buffer);
+        _ = try vkd.endCommandBuffer(command_buffer);
     }
 
-    fn createCommandBuffer(self: *HelloTriangleApplication) !void {
+    fn createCommandBuffers(self: *HelloTriangleApplication) !void {
+        self.command_buffers = try allocator.alloc(vk.CommandBuffer, max_frames_in_flight);
+
         var alloc_info = vk.CommandBufferAllocateInfo{
             .command_pool = self.command_pool,
             .level = .primary,
-            .command_buffer_count = 1,
+            .command_buffer_count = @intCast(self.command_buffers.len),
         };
 
-        _ = try vkd.allocateCommandBuffers(self.device, &alloc_info, @ptrCast(&self.command_buffer));
+        _ = try vkd.allocateCommandBuffers(self.device, &alloc_info, @ptrCast(self.command_buffers.ptr));
     }
 
     fn createCommandPool(self: *HelloTriangleApplication) !void {
@@ -1132,34 +1145,34 @@ const HelloTriangleApplication = struct {
     }
 
     fn drawFrame(self: *HelloTriangleApplication) !void {
-        _ = try vkd.waitForFences(self.device, 1, @ptrCast(&self.in_flight_fence), vk.TRUE, std.math.maxInt(u64));
-        _ = try vkd.resetFences(self.device, 1, @ptrCast(&self.in_flight_fence));
+        _ = try vkd.waitForFences(self.device, 1, @ptrCast(&self.in_flight_fences[current_frame]), vk.TRUE, std.math.maxInt(u64));
+        _ = try vkd.resetFences(self.device, 1, @ptrCast(&self.in_flight_fences[current_frame]));
 
         const image_result = try vkd.acquireNextImageKHR(
             self.device,
             self.swap_chain,
             std.math.maxInt(u64),
-            self.image_available_semaphore,
+            self.image_available_semaphores[current_frame],
             .null_handle,
         );
 
-        _ = try vkd.resetCommandBuffer(self.command_buffer, .{});
-        _ = try self.recordCommandBuffer(self.command_buffer, image_result.image_index);
+        _ = try vkd.resetCommandBuffer(self.command_buffers[current_frame], .{});
+        _ = try self.recordCommandBuffer(self.command_buffers[current_frame], image_result.image_index);
 
-        const wait_semaphores = [_]vk.Semaphore{self.image_available_semaphore};
+        const wait_semaphores = [_]vk.Semaphore{self.image_available_semaphores[current_frame]};
         const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
-        const signal_semaphores = [_]vk.Semaphore{self.render_finished_semaphore};
+        const signal_semaphores = [_]vk.Semaphore{self.render_finished_semaphores[current_frame]};
         var submit_info = vk.SubmitInfo{
             .wait_semaphore_count = 1,
             .p_wait_semaphores = &wait_semaphores,
             .p_wait_dst_stage_mask = &wait_stages,
             .command_buffer_count = 1,
-            .p_command_buffers = @ptrCast(&self.command_buffer),
+            .p_command_buffers = @ptrCast(&self.command_buffers[current_frame]),
             .signal_semaphore_count = 1,
             .p_signal_semaphores = &signal_semaphores,
         };
 
-        try vkd.queueSubmit(self.graphics_queue, 1, @ptrCast(&submit_info), self.in_flight_fence);
+        try vkd.queueSubmit(self.graphics_queue, 1, @ptrCast(&submit_info), self.in_flight_fences[current_frame]);
 
         const swap_chains = [_]vk.SwapchainKHR{self.swap_chain};
         const present_info = vk.PresentInfoKHR{
@@ -1172,13 +1185,22 @@ const HelloTriangleApplication = struct {
         };
 
         _ = try vkd.queuePresentKHR(self.present_queue, &present_info);
+
+        current_frame = (current_frame + 1) % max_frames_in_flight;
     }
 
     fn cleanup(self: *HelloTriangleApplication) void {
-        vkd.destroySemaphore(self.device, self.image_available_semaphore, null);
-        vkd.destroySemaphore(self.device, self.render_finished_semaphore, null);
-        vkd.destroyFence(self.device, self.in_flight_fence, null);
-        vkd.destroyCommandPool(self.device, self.command_pool, null);
+        allocator.free(self.command_buffers);
+        allocator.free(self.image_available_semaphores);
+        allocator.free(self.render_finished_semaphores);
+        allocator.free(self.in_flight_fences);
+
+        for (0..max_frames_in_flight) |i| {
+            vkd.destroySemaphore(self.device, self.image_available_semaphores[i], null);
+            vkd.destroySemaphore(self.device, self.render_finished_semaphores[i], null);
+            vkd.destroyFence(self.device, self.in_flight_fences[i], null);
+            vkd.destroyCommandPool(self.device, self.command_pool, null);
+        }
 
         for (self.swap_chain_framebuffers) |framebuffer| {
             vkd.destroyFramebuffer(self.device, framebuffer, null);
