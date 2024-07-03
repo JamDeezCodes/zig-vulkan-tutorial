@@ -781,7 +781,7 @@ const HelloTriangleApplication = struct {
             .composite_alpha = .{ .opaque_bit_khr = true },
             .present_mode = present_mode,
             .clipped = vk.TRUE,
-            .old_swapchain = .null_handle,
+            .old_swapchain = self.swap_chain,
         };
 
         const indices = try findQueueFamilies(self, self.physical_device);
@@ -818,6 +818,9 @@ const HelloTriangleApplication = struct {
     }
 
     fn recreateSwapChain(self: *HelloTriangleApplication) !void {
+        // NOTE: This call is causing the program to crash, similarly to how it crashes
+        // when calling destroy() on cleanup. Something must be incorrect with how we've
+        // set up the glfw window
         var size = self.window.?.getFramebufferSize();
 
         while (size.width == 0 or size.height == 0) {
@@ -1234,8 +1237,6 @@ const HelloTriangleApplication = struct {
             self.framebuffer_resized)
         {
             self.framebuffer_resized = false;
-            // TODO: Figure out why window resizing causes a crash inside this call
-            // to recreate the swap chain
             try self.recreateSwapChain();
         } else if (present_result != .success) {
             @panic("failed to present swap chain image");
@@ -1252,17 +1253,17 @@ const HelloTriangleApplication = struct {
         allocator.free(self.render_finished_semaphores);
         allocator.free(self.in_flight_fences);
 
-        for (0..max_frames_in_flight) |i| {
-            vkd.destroySemaphore(self.device, self.image_available_semaphores[i], null);
-            vkd.destroySemaphore(self.device, self.render_finished_semaphores[i], null);
-            vkd.destroyFence(self.device, self.in_flight_fences[i], null);
-            vkd.destroyCommandPool(self.device, self.command_pool, null);
-        }
-
         vkd.destroyPipeline(self.device, self.graphics_pipeline, null);
         vkd.destroyPipelineLayout(self.device, self.pipeline_layout, null);
         vkd.destroyRenderPass(self.device, self.render_pass, null);
 
+        for (0..max_frames_in_flight) |i| {
+            vkd.destroySemaphore(self.device, self.image_available_semaphores[i], null);
+            vkd.destroySemaphore(self.device, self.render_finished_semaphores[i], null);
+            vkd.destroyFence(self.device, self.in_flight_fences[i], null);
+        }
+
+        vkd.destroyCommandPool(self.device, self.command_pool, null);
         vkd.destroyDevice(self.device, null);
 
         if (enable_validation_layers) {
