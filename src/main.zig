@@ -343,6 +343,12 @@ fn chooseSwapExtent(
     }
 }
 
+fn framebufferResizeCallback(window: glfw.Window, _: u32, _: u32) void {
+    const maybe_app = window.getUserPointer(HelloTriangleApplication);
+
+    if (maybe_app) |app| app.framebuffer_resized = true;
+}
+
 const HelloTriangleApplication = struct {
     window: ?*const glfw.Window = null,
     instance: vk.Instance = .null_handle,
@@ -366,6 +372,7 @@ const HelloTriangleApplication = struct {
     image_available_semaphores: []vk.Semaphore = undefined,
     render_finished_semaphores: []vk.Semaphore = undefined,
     in_flight_fences: []vk.Fence = undefined,
+    framebuffer_resized: bool = false,
 
     pub fn run(self: *HelloTriangleApplication) !void {
         self.initWindow();
@@ -382,13 +389,15 @@ const HelloTriangleApplication = struct {
 
         const window = glfw.Window.create(width, height, "Vulkan", null, null, .{
             .client_api = .no_api,
-            .resizable = false,
+            .resizable = true,
         }) orelse {
             std.log.err("failed to create GLFW window: {?s}", .{glfw.getErrorString()});
             std.process.exit(1);
         };
 
         self.window = &window;
+        self.window.?.setUserPointer(self);
+        self.window.?.setFramebufferSizeCallback(framebufferResizeCallback);
     }
 
     // TODO: Consider a procedural refactoring of this struct and all its member functions, many of which
@@ -796,6 +805,32 @@ const HelloTriangleApplication = struct {
         self.swap_chain_extent = extent;
     }
 
+    fn cleanupSwapChain(self: *HelloTriangleApplication) !void {
+        for (self.swap_chain_framebuffers) |framebuffer| {
+            vkd.destroyFramebuffer(self.device, framebuffer, null);
+        }
+
+        for (self.swap_chain_image_views) |image_view| {
+            vkd.destroyImageView(self.device, image_view, null);
+        }
+
+        vkd.destroySwapchainKHR(self.device, self.swap_chain, null);
+    }
+
+    fn recreateSwapChain(self: *HelloTriangleApplication) !void {
+        var size = self.window.?.getFramebufferSize();
+
+        while (size.width == 0 or size.height == 0) {
+            size = self.window.?.getFramebufferSize();
+            glfw.waitEvents();
+        }
+
+        try vkd.deviceWaitIdle(self.device);
+        try self.createSwapChain();
+        try self.createImageViews();
+        try self.createFrameBuffers();
+    }
+
     fn createSurface(self: *HelloTriangleApplication) !void {
         if (glfw.createWindowSurface(
             self.instance,
@@ -859,8 +894,9 @@ const HelloTriangleApplication = struct {
         }
 
         if (enable_validation_layers) {
-            create_info.enabled_layer_count = @intCast(layers.items.len);
-            create_info.pp_enabled_layer_names = @ptrCast(layers.items);
+            // NOTE: pp_enabled_layer names are inherited and therefore deprecated
+            //create_info.enabled_layer_count = @intCast(layers.items.len);
+            //create_info.pp_enabled_layer_names = @ptrCast(layers.items);
         } else {
             create_info.enabled_layer_count = 0;
         }
@@ -1146,7 +1182,6 @@ const HelloTriangleApplication = struct {
 
     fn drawFrame(self: *HelloTriangleApplication) !void {
         _ = try vkd.waitForFences(self.device, 1, @ptrCast(&self.in_flight_fences[current_frame]), vk.TRUE, std.math.maxInt(u64));
-        _ = try vkd.resetFences(self.device, 1, @ptrCast(&self.in_flight_fences[current_frame]));
 
         const image_result = try vkd.acquireNextImageKHR(
             self.device,
@@ -1156,6 +1191,14 @@ const HelloTriangleApplication = struct {
             .null_handle,
         );
 
+        if (image_result.result == .error_out_of_date_khr) {
+            try self.recreateSwapChain();
+            return;
+        } else if (image_result.result != .success and image_result.result != .suboptimal_khr) {
+            @panic("failed to acquire swap chain image!");
+        }
+
+        _ = try vkd.resetFences(self.device, 1, @ptrCast(&self.in_flight_fences[current_frame]));
         _ = try vkd.resetCommandBuffer(self.command_buffers[current_frame], .{});
         _ = try self.recordCommandBuffer(self.command_buffers[current_frame], image_result.image_index);
 
@@ -1184,12 +1227,26 @@ const HelloTriangleApplication = struct {
             .p_results = null,
         };
 
-        _ = try vkd.queuePresentKHR(self.present_queue, &present_info);
+        const present_result = try vkd.queuePresentKHR(self.present_queue, &present_info);
+
+        if (present_result == .error_out_of_date_khr or
+            present_result == .suboptimal_khr or
+            self.framebuffer_resized)
+        {
+            self.framebuffer_resized = false;
+            // TODO: Figure out why window resizing causes a crash inside this call
+            // to recreate the swap chain
+            try self.recreateSwapChain();
+        } else if (present_result != .success) {
+            @panic("failed to present swap chain image");
+        }
 
         current_frame = (current_frame + 1) % max_frames_in_flight;
     }
 
     fn cleanup(self: *HelloTriangleApplication) void {
+        try self.cleanupSwapChain();
+
         allocator.free(self.command_buffers);
         allocator.free(self.image_available_semaphores);
         allocator.free(self.render_finished_semaphores);
@@ -1202,19 +1259,10 @@ const HelloTriangleApplication = struct {
             vkd.destroyCommandPool(self.device, self.command_pool, null);
         }
 
-        for (self.swap_chain_framebuffers) |framebuffer| {
-            vkd.destroyFramebuffer(self.device, framebuffer, null);
-        }
-
         vkd.destroyPipeline(self.device, self.graphics_pipeline, null);
         vkd.destroyPipelineLayout(self.device, self.pipeline_layout, null);
         vkd.destroyRenderPass(self.device, self.render_pass, null);
 
-        for (self.swap_chain_image_views) |image_view| {
-            vkd.destroyImageView(self.device, image_view, null);
-        }
-
-        vkd.destroySwapchainKHR(self.device, self.swap_chain, null);
         vkd.destroyDevice(self.device, null);
 
         if (enable_validation_layers) {
