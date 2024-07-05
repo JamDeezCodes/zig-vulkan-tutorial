@@ -27,6 +27,10 @@ const device_extensions = [_][*:0]const u8{
     vk.extensions.khr_swapchain.name,
 };
 
+const UserPointer = struct {
+    self: *HelloTriangleApplication,
+};
+
 const enable_validation_layers =
     if (builtin.mode == std.builtin.Mode.Debug) true else false;
 
@@ -324,7 +328,7 @@ fn chooseSwapExtent(
     if (capabilities.current_extent.width != std.math.maxInt(u32)) {
         return capabilities.current_extent;
     } else {
-        const size = app.window.?.getFramebufferSize();
+        const size = app.window.getFramebufferSize();
 
         var actual_extent = vk.Extent2D{ .width = size.width, .height = size.height };
 
@@ -343,14 +347,9 @@ fn chooseSwapExtent(
     }
 }
 
-fn framebufferResizeCallback(window: glfw.Window, _: u32, _: u32) void {
-    const maybe_app = window.getUserPointer(HelloTriangleApplication);
-
-    if (maybe_app) |app| app.framebuffer_resized = true;
-}
-
 const HelloTriangleApplication = struct {
-    window: ?*const glfw.Window = null,
+    user_ptr: UserPointer = undefined,
+    window: *const glfw.Window = undefined,
     instance: vk.Instance = .null_handle,
     debug_messenger: vk.DebugUtilsMessengerEXT = .null_handle,
     physical_device: vk.PhysicalDevice = .null_handle,
@@ -382,22 +381,31 @@ const HelloTriangleApplication = struct {
     }
 
     fn initWindow(self: *HelloTriangleApplication) void {
+        self.user_ptr = .{ .self = self };
+
         if (!glfw.init(.{})) {
             std.log.err("failed to initialize GLFW: {?s}", .{glfw.getErrorString()});
             std.process.exit(1);
         }
 
-        const window = glfw.Window.create(width, height, "Vulkan", null, null, .{
+        const glfw_window = glfw.Window.create(width, height, "Vulkan", null, null, .{
             .client_api = .no_api,
-            .resizable = true,
         }) orelse {
             std.log.err("failed to create GLFW window: {?s}", .{glfw.getErrorString()});
             std.process.exit(1);
         };
 
-        self.window = &window;
-        self.window.?.setUserPointer(self);
-        self.window.?.setFramebufferSizeCallback(framebufferResizeCallback);
+        self.window = &glfw_window;
+        self.window.setUserPointer(&self.user_ptr);
+
+        const framebuffer_size_callback = struct {
+            fn callback(window: glfw.Window, _: u32, _: u32) void {
+                const app = (window.getUserPointer(UserPointer) orelse unreachable).self;
+                app.framebuffer_resized = true;
+            }
+        }.callback;
+
+        self.window.setFramebufferSizeCallback(framebuffer_size_callback);
     }
 
     // TODO: Consider a procedural refactoring of this struct and all its member functions, many of which
@@ -821,10 +829,10 @@ const HelloTriangleApplication = struct {
         // NOTE: This call is causing the program to crash, similarly to how it crashes
         // when calling destroy() on cleanup. Something must be incorrect with how we've
         // set up the glfw window
-        var size = self.window.?.getFramebufferSize();
+        var size = self.window.getFramebufferSize();
 
         while (size.width == 0 or size.height == 0) {
-            size = self.window.?.getFramebufferSize();
+            size = self.window.getFramebufferSize();
             glfw.waitEvents();
         }
 
@@ -837,7 +845,7 @@ const HelloTriangleApplication = struct {
     fn createSurface(self: *HelloTriangleApplication) !void {
         if (glfw.createWindowSurface(
             self.instance,
-            self.window.?.*,
+            self.window.*,
             null,
             &self.surface,
         ) != @intFromEnum(vk.Result.success)) {
@@ -1175,9 +1183,10 @@ const HelloTriangleApplication = struct {
     }
 
     fn mainLoop(self: *HelloTriangleApplication) !void {
-        while (!self.window.?.shouldClose()) {
+        while (!self.window.shouldClose()) {
             glfw.pollEvents();
-            try self.drawFrame();
+            // TODO: Figure out why calling drawFrame() on the pointer itself causes a seg fault
+            try drawFrame(self);
         }
 
         try vkd.deviceWaitIdle(self.device);
@@ -1208,6 +1217,7 @@ const HelloTriangleApplication = struct {
         const wait_semaphores = [_]vk.Semaphore{self.image_available_semaphores[current_frame]};
         const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
         const signal_semaphores = [_]vk.Semaphore{self.render_finished_semaphores[current_frame]};
+
         var submit_info = vk.SubmitInfo{
             .wait_semaphore_count = 1,
             .p_wait_semaphores = &wait_semaphores,
@@ -1277,7 +1287,7 @@ const HelloTriangleApplication = struct {
         vki.destroySurfaceKHR(self.instance, self.surface, null);
         vki.destroyInstance(self.instance, null);
         // TODO: Why does produce an illegal instruction at address error?
-        self.window.?.destroy();
+        self.window.destroy();
         glfw.terminate();
     }
 
