@@ -9,8 +9,12 @@ const frag = @embedFile("frag");
 
 const assert = std.debug.assert;
 
+const vec2 = mach.math.vec2;
+const vec3 = mach.math.vec3;
 const vec4 = mach.math.vec4;
 const mat4 = mach.math.mat4x4;
+const Vec2 = mach.math.Vec2;
+const Vec3 = mach.math.Vec3;
 const Vec4 = mach.math.Vec4;
 const Mat4x4 = mach.math.Mat4x4;
 
@@ -129,6 +133,43 @@ const SwapChainSupportDetails = struct {
     capabilities: vk.SurfaceCapabilitiesKHR,
     formats: []vk.SurfaceFormatKHR,
     present_modes: []vk.PresentModeKHR,
+};
+
+const Vertex = struct {
+    pos: Vec2,
+    color: Vec3,
+
+    fn getBindingDescription() vk.VertexInputBindingDescription {
+        const result = vk.VertexInputBindingDescription{
+            .binding = 0,
+            .stride = @sizeOf(Vertex),
+            .input_rate = .vertex,
+        };
+
+        return result;
+    }
+
+    fn getAttributeDescriptions() ![]vk.VertexInputAttributeDescription {
+        var result = try allocator.alloc(vk.VertexInputAttributeDescription, 2);
+
+        result[0].binding = 0;
+        result[0].location = 0;
+        result[0].format = .r32g32_sfloat;
+        result[0].offset = @offsetOf(Vertex, "pos");
+
+        result[1].binding = 0;
+        result[1].location = 0;
+        result[1].format = .r32g32b32_sfloat;
+        result[1].offset = @offsetOf(Vertex, "color");
+
+        return result;
+    }
+};
+
+const vertices = [_]Vertex{
+    .{ .pos = vec2(0, -0.5), .color = vec3(1, 0, 0) },
+    .{ .pos = vec2(0.5, 0.5), .color = vec3(0, 1, 0) },
+    .{ .pos = vec2(-0.5, 0.5), .color = vec3(0, 0, 1) },
 };
 
 fn printAvailableExtensions(available_extensions: []vk.ExtensionProperties) void {
@@ -575,14 +616,14 @@ const HelloTriangleApplication = struct {
     }
 
     fn createGraphicsPipeline(self: *HelloTriangleApplication) !void {
-        //const vert_shader_module = try self.createShaderModule(vert);
+        //const vert_shader_module = try createShaderModule(self, vert);
         const vert_shader_module = try vkd.createShaderModule(self.device, &.{
             .code_size = vert.len,
             .p_code = @ptrCast(@alignCast(vert)),
         }, null);
         defer vkd.destroyShaderModule(self.device, vert_shader_module, null);
 
-        //const frag_shader_module = try self.createShaderModule(frag);
+        //const frag_shader_module = try createShaderModule(self, frag);
         const frag_shader_module = try vkd.createShaderModule(self.device, &.{
             .code_size = frag.len,
             .p_code = @ptrCast(@alignCast(frag)),
@@ -609,11 +650,15 @@ const HelloTriangleApplication = struct {
             .p_dynamic_states = &dynamic_states,
         };
 
+        const binding_description = Vertex.getBindingDescription();
+        const attribute_descriptions = try Vertex.getAttributeDescriptions();
+        defer allocator.free(attribute_descriptions);
+
         const vertex_input_info = vk.PipelineVertexInputStateCreateInfo{
-            .vertex_binding_description_count = 0,
-            .p_vertex_binding_descriptions = null,
-            .vertex_attribute_description_count = 0,
-            .p_vertex_attribute_descriptions = null,
+            .vertex_binding_description_count = 1,
+            .p_vertex_binding_descriptions = @ptrCast(&binding_description),
+            .vertex_attribute_description_count = 1,
+            .p_vertex_attribute_descriptions = @ptrCast(attribute_descriptions.ptr),
         };
 
         const input_assembly = vk.PipelineInputAssemblyStateCreateInfo{
