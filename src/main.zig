@@ -70,6 +70,7 @@ const InstanceDispatch = vk.InstanceWrapper(&.{
             .getPhysicalDeviceSurfaceCapabilitiesKHR = true,
             .getPhysicalDeviceSurfaceFormatsKHR = true,
             .getPhysicalDeviceSurfacePresentModesKHR = true,
+            .getPhysicalDeviceMemoryProperties = true,
             .destroyInstance = true,
             .destroySurfaceKHR = true,
             .getDeviceProcAddr = true,
@@ -82,11 +83,14 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
         .device_commands = .{
             .acquireNextImageKHR = true,
             .allocateCommandBuffers = true,
+            .allocateMemory = true,
             .beginCommandBuffer = true,
+            .bindBufferMemory = true,
             .cmdBindPipeline = true,
             .cmdBeginRenderPass = true,
             .cmdSetViewport = true,
             .cmdSetScissor = true,
+            .cmdBindVertexBuffers = true,
             .cmdDraw = true,
             .cmdEndRenderPass = true,
             .createSwapchainKHR = true,
@@ -99,6 +103,7 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .createCommandPool = true,
             .createSemaphore = true,
             .createFence = true,
+            .createBuffer = true,
             .destroyDevice = true,
             .destroySwapchainKHR = true,
             .destroyImageView = true,
@@ -110,14 +115,19 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .destroyCommandPool = true,
             .destroySemaphore = true,
             .destroyFence = true,
+            .destroyBuffer = true,
             .deviceWaitIdle = true,
             .endCommandBuffer = true,
+            .freeMemory = true,
             .getDeviceQueue = true,
             .getSwapchainImagesKHR = true,
+            .getBufferMemoryRequirements = true,
+            .mapMemory = true,
             .queueSubmit = true,
             .queuePresentKHR = true,
             .resetFences = true,
             .resetCommandBuffer = true,
+            .unmapMemory = true,
             .waitForFences = true,
         },
     },
@@ -158,7 +168,7 @@ const Vertex = struct {
         result[0].offset = @offsetOf(Vertex, "pos");
 
         result[1].binding = 0;
-        result[1].location = 0;
+        result[1].location = 1;
         result[1].format = .r32g32b32_sfloat;
         result[1].offset = @offsetOf(Vertex, "color");
 
@@ -166,8 +176,8 @@ const Vertex = struct {
     }
 };
 
-const vertices = [_]Vertex{
-    .{ .pos = vec2(0, -0.5), .color = vec3(1, 0, 0) },
+var vertices = [_]Vertex{
+    .{ .pos = vec2(0, -0.5), .color = vec3(1, 1, 1) },
     .{ .pos = vec2(0.5, 0.5), .color = vec3(0, 1, 0) },
     .{ .pos = vec2(-0.5, 0.5), .color = vec3(0, 0, 1) },
 };
@@ -413,12 +423,14 @@ const HelloTriangleApplication = struct {
     render_finished_semaphores: []vk.Semaphore = undefined,
     in_flight_fences: []vk.Fence = undefined,
     framebuffer_resized: bool = false,
+    vertex_buffer: vk.Buffer = .null_handle,
+    vertex_buffer_memory: vk.DeviceMemory = .null_handle,
 
     pub fn run(self: *HelloTriangleApplication) !void {
-        self.initWindow();
-        try self.initVulkan();
-        defer self.cleanup();
-        try self.mainLoop();
+        initWindow(self);
+        try initVulkan(self);
+        defer cleanup(self);
+        try mainLoop(self);
     }
 
     fn initWindow(self: *HelloTriangleApplication) void {
@@ -453,19 +465,74 @@ const HelloTriangleApplication = struct {
     // do not seem to see any reuse. Maybe a larger app would see some of these functions being called more
     // than once?
     fn initVulkan(self: *HelloTriangleApplication) !void {
-        try self.createInstance();
-        self.setupDebugMessenger();
-        try self.createSurface();
-        try self.pickPhysicalDevice();
-        try self.createLogicalDevice();
-        try self.createSwapChain();
-        try self.createImageViews();
-        try self.createRenderPass();
-        try self.createGraphicsPipeline();
-        try self.createFrameBuffers();
-        try self.createCommandPool();
-        try self.createCommandBuffers();
-        try self.createSyncObjects();
+        try createInstance(self);
+        setupDebugMessenger(self);
+        try createSurface(self);
+        try pickPhysicalDevice(self);
+        try createLogicalDevice(self);
+        try createSwapChain(self);
+        try createImageViews(self);
+        try createRenderPass(self);
+        try createGraphicsPipeline(self);
+        try createFrameBuffers(self);
+        try createCommandPool(self);
+        try createVertexBuffer(self);
+        try createCommandBuffers(self);
+        try createSyncObjects(self);
+    }
+
+    fn findMemoryType(
+        self: *HelloTriangleApplication,
+        type_filter: u32,
+        properties: vk.MemoryPropertyFlags,
+    ) u32 {
+        const mem_properties = vki.getPhysicalDeviceMemoryProperties(self.physical_device);
+
+        for (0..mem_properties.memory_type_count) |i| {
+            const flags = mem_properties.memory_types[i].property_flags;
+
+            if ((type_filter & (@as(u64, @intCast(1)) << @intCast(i))) > 0 and
+                flags.host_visible_bit == properties.host_visible_bit and
+                flags.host_coherent_bit == properties.host_coherent_bit)
+            {
+                return @intCast(i);
+            }
+        }
+
+        @panic("failed to find suitable memory type!");
+    }
+
+    fn createVertexBuffer(self: *HelloTriangleApplication) !void {
+        var buffer_info = vk.BufferCreateInfo{
+            .size = @sizeOf(Vertex) * vertices.len,
+            .usage = .{ .vertex_buffer_bit = true },
+            .sharing_mode = .exclusive,
+        };
+
+        self.vertex_buffer = try vkd.createBuffer(self.device, &buffer_info, null);
+        const mem_requirements = vkd.getBufferMemoryRequirements(self.device, self.vertex_buffer);
+
+        var alloc_info = vk.MemoryAllocateInfo{
+            .allocation_size = mem_requirements.size,
+            .memory_type_index = findMemoryType(self, mem_requirements.memory_type_bits, .{
+                .host_visible_bit = true,
+                .host_coherent_bit = true,
+            }),
+        };
+
+        self.vertex_buffer_memory = try vkd.allocateMemory(self.device, &alloc_info, null);
+        _ = try vkd.bindBufferMemory(self.device, self.vertex_buffer, self.vertex_buffer_memory, 0);
+
+        const maybe_data = try vkd.mapMemory(self.device, self.vertex_buffer_memory, 0, buffer_info.size, .{});
+
+        if (maybe_data) |data| {
+            @memcpy(
+                @as([*]u8, @ptrCast(data))[0..buffer_info.size],
+                @as([*]u8, @ptrCast(&vertices)),
+            );
+        }
+
+        vkd.unmapMemory(self.device, self.vertex_buffer_memory);
     }
 
     fn createSyncObjects(self: *HelloTriangleApplication) !void {
@@ -509,6 +576,10 @@ const HelloTriangleApplication = struct {
         vkd.cmdBeginRenderPass(command_buffer, &render_pass_info, .@"inline");
         vkd.cmdBindPipeline(command_buffer, .graphics, self.graphics_pipeline);
 
+        const vertex_buffers = [_]vk.Buffer{self.vertex_buffer};
+        const offsets = [_]vk.DeviceSize{0};
+        vkd.cmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffers, &offsets);
+
         const viewport = vk.Viewport{
             .x = 0,
             .y = 0,
@@ -526,7 +597,7 @@ const HelloTriangleApplication = struct {
         };
 
         vkd.cmdSetScissor(command_buffer, 0, 1, @ptrCast(&scissor));
-        vkd.cmdDraw(command_buffer, 3, 1, 0, 0);
+        vkd.cmdDraw(command_buffer, vertices.len, 1, 0, 0);
         vkd.cmdEndRenderPass(command_buffer);
         _ = try vkd.endCommandBuffer(command_buffer);
     }
@@ -657,7 +728,7 @@ const HelloTriangleApplication = struct {
         const vertex_input_info = vk.PipelineVertexInputStateCreateInfo{
             .vertex_binding_description_count = 1,
             .p_vertex_binding_descriptions = @ptrCast(&binding_description),
-            .vertex_attribute_description_count = 1,
+            .vertex_attribute_description_count = @intCast(attribute_descriptions.len),
             .p_vertex_attribute_descriptions = @ptrCast(attribute_descriptions.ptr),
         };
 
@@ -1303,11 +1374,8 @@ const HelloTriangleApplication = struct {
     fn cleanup(self: *HelloTriangleApplication) void {
         try self.cleanupSwapChain();
 
-        allocator.free(self.command_buffers);
-        allocator.free(self.image_available_semaphores);
-        allocator.free(self.render_finished_semaphores);
-        allocator.free(self.in_flight_fences);
-
+        vkd.destroyBuffer(self.device, self.vertex_buffer, null);
+        vkd.freeMemory(self.device, self.vertex_buffer_memory, null);
         vkd.destroyPipeline(self.device, self.graphics_pipeline, null);
         vkd.destroyPipelineLayout(self.device, self.pipeline_layout, null);
         vkd.destroyRenderPass(self.device, self.render_pass, null);
@@ -1317,6 +1385,11 @@ const HelloTriangleApplication = struct {
             vkd.destroySemaphore(self.device, self.render_finished_semaphores[i], null);
             vkd.destroyFence(self.device, self.in_flight_fences[i], null);
         }
+
+        allocator.free(self.command_buffers);
+        allocator.free(self.image_available_semaphores);
+        allocator.free(self.render_finished_semaphores);
+        allocator.free(self.in_flight_fences);
 
         vkd.destroyCommandPool(self.device, self.command_pool, null);
         vkd.destroyDevice(self.device, null);
