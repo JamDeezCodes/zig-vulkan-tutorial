@@ -93,6 +93,7 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .cmdBindVertexBuffers = true,
             .cmdDraw = true,
             .cmdEndRenderPass = true,
+            .cmdCopyBuffer = true,
             .createSwapchainKHR = true,
             .createImageView = true,
             .createShaderModule = true,
@@ -119,12 +120,14 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .deviceWaitIdle = true,
             .endCommandBuffer = true,
             .freeMemory = true,
+            .freeCommandBuffers = true,
             .getDeviceQueue = true,
             .getSwapchainImagesKHR = true,
             .getBufferMemoryRequirements = true,
             .mapMemory = true,
             .queueSubmit = true,
             .queuePresentKHR = true,
+            .queueWaitIdle = true,
             .resetFences = true,
             .resetCommandBuffer = true,
             .unmapMemory = true,
@@ -136,6 +139,7 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
 const QueueFamilyIndices = struct {
     graphics_family: ?u32 = null,
     present_family: ?u32 = null,
+    transfer_family: ?u32 = null,
     slice: []u32 = undefined,
 };
 
@@ -405,9 +409,10 @@ const HelloTriangleApplication = struct {
     debug_messenger: vk.DebugUtilsMessengerEXT = .null_handle,
     physical_device: vk.PhysicalDevice = .null_handle,
     device: vk.Device = .null_handle,
-    graphics_queue: vk.Queue = .null_handle,
     surface: vk.SurfaceKHR = .null_handle,
+    graphics_queue: vk.Queue = .null_handle,
     present_queue: vk.Queue = .null_handle,
+    transfer_queue: vk.Queue = .null_handle,
     swap_chain: vk.SwapchainKHR = .null_handle,
     swap_chain_images: []vk.Image = undefined,
     swap_chain_image_format: vk.Format = .undefined,
@@ -418,6 +423,7 @@ const HelloTriangleApplication = struct {
     graphics_pipeline: vk.Pipeline = .null_handle,
     swap_chain_framebuffers: []vk.Framebuffer = undefined,
     command_pool: vk.CommandPool = .null_handle,
+    transfer_command_pool: vk.CommandPool = .null_handle,
     command_buffers: []vk.CommandBuffer = undefined,
     image_available_semaphores: []vk.Semaphore = undefined,
     render_finished_semaphores: []vk.Semaphore = undefined,
@@ -502,37 +508,116 @@ const HelloTriangleApplication = struct {
         @panic("failed to find suitable memory type!");
     }
 
-    fn createVertexBuffer(self: *HelloTriangleApplication) !void {
-        var buffer_info = vk.BufferCreateInfo{
-            .size = @sizeOf(Vertex) * vertices.len,
-            .usage = .{ .vertex_buffer_bit = true },
-            .sharing_mode = .exclusive,
+    fn copyBuffer(
+        self: *HelloTriangleApplication,
+        source_buffer: vk.Buffer,
+        dest_buffer: vk.Buffer,
+        size: vk.DeviceSize,
+    ) !void {
+        const alloc_info = vk.CommandBufferAllocateInfo{
+            .level = .primary,
+            .command_pool = self.command_pool,
+            .command_buffer_count = 1,
         };
 
-        self.vertex_buffer = try vkd.createBuffer(self.device, &buffer_info, null);
-        const mem_requirements = vkd.getBufferMemoryRequirements(self.device, self.vertex_buffer);
+        var command_buffer: vk.CommandBuffer = .null_handle;
+        _ = try vkd.allocateCommandBuffers(self.device, &alloc_info, @ptrCast(&command_buffer));
+
+        const begin_info = vk.CommandBufferBeginInfo{
+            .flags = .{ .one_time_submit_bit = true },
+        };
+
+        _ = try vkd.beginCommandBuffer(command_buffer, &begin_info);
+
+        const copy_region = vk.BufferCopy{
+            .src_offset = 0,
+            .dst_offset = 0,
+            .size = size,
+        };
+
+        vkd.cmdCopyBuffer(command_buffer, source_buffer, dest_buffer, 1, @ptrCast(&copy_region));
+        _ = try vkd.endCommandBuffer(command_buffer);
+
+        const submit_info = vk.SubmitInfo{
+            .command_buffer_count = 1,
+            .p_command_buffers = @ptrCast(&command_buffer),
+        };
+
+        if (self.transfer_queue != .null_handle) {
+            _ = try vkd.queueSubmit(self.transfer_queue, 1, @ptrCast(&submit_info), .null_handle);
+            _ = try vkd.queueWaitIdle(self.transfer_queue);
+        } else {
+            _ = try vkd.queueSubmit(self.graphics_queue, 1, @ptrCast(&submit_info), .null_handle);
+            _ = try vkd.queueWaitIdle(self.graphics_queue);
+        }
+
+        vkd.freeCommandBuffers(self.device, self.command_pool, 1, @ptrCast(&command_buffer));
+    }
+
+    fn createBuffer(
+        self: *HelloTriangleApplication,
+        buffer_size: usize,
+        usage: vk.BufferUsageFlags,
+        properties: vk.MemoryPropertyFlags,
+        buffer: *vk.Buffer,
+        buffer_memory: *vk.DeviceMemory,
+    ) !void {
+        var buffer_info = vk.BufferCreateInfo{
+            .size = buffer_size,
+            .usage = usage,
+            .sharing_mode = .exclusive,
+            //.sharing_mode = .concurrent,
+        };
+
+        buffer.* = try vkd.createBuffer(self.device, &buffer_info, null);
+        const mem_requirements = vkd.getBufferMemoryRequirements(self.device, buffer.*);
 
         var alloc_info = vk.MemoryAllocateInfo{
             .allocation_size = mem_requirements.size,
-            .memory_type_index = findMemoryType(self, mem_requirements.memory_type_bits, .{
-                .host_visible_bit = true,
-                .host_coherent_bit = true,
-            }),
+            .memory_type_index = findMemoryType(self, mem_requirements.memory_type_bits, properties),
         };
 
-        self.vertex_buffer_memory = try vkd.allocateMemory(self.device, &alloc_info, null);
-        _ = try vkd.bindBufferMemory(self.device, self.vertex_buffer, self.vertex_buffer_memory, 0);
+        // NOTE: Offsets should be used appropriately in a production application instead of
+        // allocating memory for every single buffer
+        buffer_memory.* = try vkd.allocateMemory(self.device, &alloc_info, null);
+        _ = try vkd.bindBufferMemory(self.device, buffer.*, buffer_memory.*, 0);
+    }
 
-        const maybe_data = try vkd.mapMemory(self.device, self.vertex_buffer_memory, 0, buffer_info.size, .{});
+    fn createVertexBuffer(self: *HelloTriangleApplication) !void {
+        const buffer_size = @sizeOf(Vertex) * vertices.len;
 
-        if (maybe_data) |data| {
-            @memcpy(
-                @as([*]u8, @ptrCast(data))[0..buffer_info.size],
-                @as([*]u8, @ptrCast(&vertices)),
-            );
-        }
+        var staging_buffer: vk.Buffer = .null_handle;
+        var staging_buffer_memory: vk.DeviceMemory = .null_handle;
 
-        vkd.unmapMemory(self.device, self.vertex_buffer_memory);
+        try createBuffer(
+            self,
+            buffer_size,
+            .{ .transfer_src_bit = true },
+            .{ .host_visible_bit = true, .host_coherent_bit = true },
+            &staging_buffer,
+            &staging_buffer_memory,
+        );
+
+        const maybe_data = try vkd.mapMemory(self.device, staging_buffer_memory, 0, buffer_size, .{});
+
+        if (maybe_data) |data| @memcpy(
+            @as([*]u8, @ptrCast(data))[0..buffer_size],
+            @as([*]u8, @ptrCast(&vertices)),
+        );
+
+        try createBuffer(
+            self,
+            buffer_size,
+            .{ .transfer_dst_bit = true, .vertex_buffer_bit = true },
+            .{ .device_local_bit = true },
+            &self.vertex_buffer,
+            &self.vertex_buffer_memory,
+        );
+
+        try copyBuffer(self, staging_buffer, self.vertex_buffer, buffer_size);
+
+        vkd.destroyBuffer(self.device, staging_buffer, null);
+        vkd.freeMemory(self.device, staging_buffer_memory, null);
     }
 
     fn createSyncObjects(self: *HelloTriangleApplication) !void {
@@ -623,6 +708,15 @@ const HelloTriangleApplication = struct {
         };
 
         self.command_pool = try vkd.createCommandPool(self.device, &pool_info, null);
+
+        if (queue_family_indices.transfer_family) |transfer_family| {
+            pool_info = vk.CommandPoolCreateInfo{
+                .flags = .{ .reset_command_buffer_bit = true },
+                .queue_family_index = transfer_family,
+            };
+
+            self.transfer_command_pool = try vkd.createCommandPool(self.device, &pool_info, null);
+        }
     }
 
     fn createFrameBuffers(self: *HelloTriangleApplication) !void {
@@ -913,7 +1007,7 @@ const HelloTriangleApplication = struct {
 
         if (indices.graphics_family.? != indices.present_family.?) {
             create_info.image_sharing_mode = .concurrent;
-            create_info.queue_family_index_count = 2;
+            create_info.queue_family_index_count = @intCast(indices.slice.len);
             create_info.p_queue_family_indices = @ptrCast(indices.slice.ptr);
         } else {
             create_info.image_sharing_mode = .exclusive;
@@ -1030,8 +1124,13 @@ const HelloTriangleApplication = struct {
 
         self.device = try vki.createDevice(self.physical_device, &create_info, null);
         vkd = try DeviceDispatch.load(self.device, vki.dispatch.vkGetDeviceProcAddr);
+
         self.graphics_queue = vkd.getDeviceQueue(self.device, indices.graphics_family.?, 0);
         self.present_queue = vkd.getDeviceQueue(self.device, indices.present_family.?, 0);
+
+        if (indices.transfer_family) |transfer_family| {
+            self.transfer_queue = vkd.getDeviceQueue(self.device, transfer_family, 0);
+        }
     }
 
     fn pickPhysicalDevice(self: *HelloTriangleApplication) !void {
@@ -1142,13 +1241,17 @@ const HelloTriangleApplication = struct {
                 indices.graphics_family = i;
             }
 
+            // NOTE: No queue families on my laptop have the transfer bit without the graphics bit
+            if (!family.queue_flags.graphics_bit and family.queue_flags.transfer_bit) {
+                indices.transfer_family = i;
+            }
+
             const present_support = try vki.getPhysicalDeviceSurfaceSupportKHR(device, i, self.surface);
 
             if (present_support == vk.TRUE) {
                 indices.present_family = i;
             }
 
-            // TODO: Determine the best way to prevent reusing the same index for each family
             if (indices.graphics_family != null and
                 indices.present_family != null)
             {
@@ -1180,15 +1283,33 @@ const HelloTriangleApplication = struct {
         //
         // Here we store a slice of one or more unique indices for later use, ensuring we do not encounter
         // the above validation errors
+        // TODO: This conditional is now a bit convoluted, can it be cleaned up?
         if (indices.graphics_family) |graphics_family| {
             if (indices.present_family) |present_family| {
-                if (graphics_family == present_family) {
-                    indices.slice = try allocator.alloc(u32, 1);
-                    indices.slice[0] = graphics_family;
+                if (indices.transfer_family) |transfer_family| {
+                    if (graphics_family == present_family) {
+                        indices.slice = try allocator.alloc(u32, 2);
+                        indices.slice[0] = graphics_family;
+                        indices.slice[1] = transfer_family;
+                    } else if (transfer_family == present_family) {
+                        indices.slice = try allocator.alloc(u32, 2);
+                        indices.slice[0] = graphics_family;
+                        indices.slice[1] = transfer_family;
+                    } else {
+                        indices.slice = try allocator.alloc(u32, 3);
+                        indices.slice[0] = graphics_family;
+                        indices.slice[1] = present_family;
+                        indices.slice[2] = transfer_family;
+                    }
                 } else {
-                    indices.slice = try allocator.alloc(u32, 2);
-                    indices.slice[0] = graphics_family;
-                    indices.slice[1] = present_family;
+                    if (graphics_family == present_family) {
+                        indices.slice = try allocator.alloc(u32, 1);
+                        indices.slice[0] = graphics_family;
+                    } else {
+                        indices.slice = try allocator.alloc(u32, 2);
+                        indices.slice[0] = graphics_family;
+                        indices.slice[1] = present_family;
+                    }
                 }
             } else unreachable;
         } else unreachable;
