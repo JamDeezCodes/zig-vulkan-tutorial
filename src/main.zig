@@ -91,7 +91,9 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .cmdSetViewport = true,
             .cmdSetScissor = true,
             .cmdBindVertexBuffers = true,
+            .cmdBindIndexBuffer = true,
             .cmdDraw = true,
+            .cmdDrawIndexed = true,
             .cmdEndRenderPass = true,
             .cmdCopyBuffer = true,
             .createSwapchainKHR = true,
@@ -149,9 +151,15 @@ const SwapChainSupportDetails = struct {
     present_modes: []vk.PresentModeKHR,
 };
 
+const vertex = Vertex.init;
+
 const Vertex = struct {
     pos: Vec2,
     color: Vec3,
+
+    pub fn init(pos: Vec2, color: Vec3) Vertex {
+        return .{ .pos = pos, .color = color };
+    }
 
     fn getBindingDescription() vk.VertexInputBindingDescription {
         const result = vk.VertexInputBindingDescription{
@@ -181,10 +189,13 @@ const Vertex = struct {
 };
 
 var vertices = [_]Vertex{
-    .{ .pos = vec2(0, -0.5), .color = vec3(1, 1, 1) },
-    .{ .pos = vec2(0.5, 0.5), .color = vec3(0, 1, 0) },
-    .{ .pos = vec2(-0.5, 0.5), .color = vec3(0, 0, 1) },
+    vertex(vec2(-0.5, -0.5), vec3(1, 0, 0)),
+    vertex(vec2(0.5, -0.5), vec3(0, 1, 0)),
+    vertex(vec2(0.5, 0.5), vec3(0, 0, 1)),
+    vertex(vec2(-0.5, 0.5), vec3(1, 1, 1)),
 };
+
+var indices = [_]u16{ 0, 1, 2, 2, 3, 0 };
 
 fn printAvailableExtensions(available_extensions: []vk.ExtensionProperties) void {
     std.debug.print("available extensions:\n", .{});
@@ -431,6 +442,8 @@ const HelloTriangleApplication = struct {
     framebuffer_resized: bool = false,
     vertex_buffer: vk.Buffer = .null_handle,
     vertex_buffer_memory: vk.DeviceMemory = .null_handle,
+    index_buffer: vk.Buffer = .null_handle,
+    index_buffer_memory: vk.DeviceMemory = .null_handle,
 
     pub fn run(self: *HelloTriangleApplication) !void {
         initWindow(self);
@@ -483,6 +496,7 @@ const HelloTriangleApplication = struct {
         try createFrameBuffers(self);
         try createCommandPool(self);
         try createVertexBuffer(self);
+        try createIndexBuffer(self);
         try createCommandBuffers(self);
         try createSyncObjects(self);
     }
@@ -583,6 +597,43 @@ const HelloTriangleApplication = struct {
         _ = try vkd.bindBufferMemory(self.device, buffer.*, buffer_memory.*, 0);
     }
 
+    fn createIndexBuffer(self: *HelloTriangleApplication) !void {
+        const buffer_size = @sizeOf(@TypeOf(indices[0])) * indices.len;
+
+        var staging_buffer: vk.Buffer = .null_handle;
+        var staging_buffer_memory: vk.DeviceMemory = .null_handle;
+
+        try createBuffer(
+            self,
+            buffer_size,
+            .{ .transfer_src_bit = true },
+            .{ .host_visible_bit = true, .host_coherent_bit = true },
+            &staging_buffer,
+            &staging_buffer_memory,
+        );
+
+        const maybe_data = try vkd.mapMemory(self.device, staging_buffer_memory, 0, buffer_size, .{});
+
+        if (maybe_data) |data| @memcpy(
+            @as([*]u8, @ptrCast(data))[0..buffer_size],
+            @as([*]u8, @ptrCast(&indices)),
+        );
+
+        try createBuffer(
+            self,
+            buffer_size,
+            .{ .transfer_dst_bit = true, .index_buffer_bit = true },
+            .{ .device_local_bit = true },
+            &self.index_buffer,
+            &self.index_buffer_memory,
+        );
+
+        try copyBuffer(self, staging_buffer, self.index_buffer, buffer_size);
+
+        vkd.destroyBuffer(self.device, staging_buffer, null);
+        vkd.freeMemory(self.device, staging_buffer_memory, null);
+    }
+
     fn createVertexBuffer(self: *HelloTriangleApplication) !void {
         const buffer_size = @sizeOf(Vertex) * vertices.len;
 
@@ -664,6 +715,7 @@ const HelloTriangleApplication = struct {
         const vertex_buffers = [_]vk.Buffer{self.vertex_buffer};
         const offsets = [_]vk.DeviceSize{0};
         vkd.cmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffers, &offsets);
+        vkd.cmdBindIndexBuffer(command_buffer, self.index_buffer, 0, .uint16);
 
         const viewport = vk.Viewport{
             .x = 0,
@@ -682,7 +734,7 @@ const HelloTriangleApplication = struct {
         };
 
         vkd.cmdSetScissor(command_buffer, 0, 1, @ptrCast(&scissor));
-        vkd.cmdDraw(command_buffer, vertices.len, 1, 0, 0);
+        vkd.cmdDrawIndexed(command_buffer, indices.len, 1, 0, 0, 0);
         vkd.cmdEndRenderPass(command_buffer);
         _ = try vkd.endCommandBuffer(command_buffer);
     }
@@ -1002,13 +1054,13 @@ const HelloTriangleApplication = struct {
             .old_swapchain = self.swap_chain,
         };
 
-        const indices = try findQueueFamilies(self, self.physical_device);
-        defer allocator.free(indices.slice);
+        const queue_family_indices = try findQueueFamilies(self, self.physical_device);
+        defer allocator.free(queue_family_indices.slice);
 
-        if (indices.graphics_family.? != indices.present_family.?) {
+        if (queue_family_indices.graphics_family.? != queue_family_indices.present_family.?) {
             create_info.image_sharing_mode = .concurrent;
-            create_info.queue_family_index_count = @intCast(indices.slice.len);
-            create_info.p_queue_family_indices = @ptrCast(indices.slice.ptr);
+            create_info.queue_family_index_count = @intCast(queue_family_indices.slice.len);
+            create_info.p_queue_family_indices = @ptrCast(queue_family_indices.slice.ptr);
         } else {
             create_info.image_sharing_mode = .exclusive;
             create_info.queue_family_index_count = 0;
@@ -1036,9 +1088,6 @@ const HelloTriangleApplication = struct {
     }
 
     fn recreateSwapChain(self: *HelloTriangleApplication) !void {
-        // NOTE: This call is causing the program to crash, similarly to how it crashes
-        // when calling destroy() on cleanup. Something must be incorrect with how we've
-        // set up the glfw window
         var size = self.window.getFramebufferSize();
 
         while (size.width == 0 or size.height == 0) {
@@ -1047,9 +1096,13 @@ const HelloTriangleApplication = struct {
         }
 
         try vkd.deviceWaitIdle(self.device);
-        try self.createSwapChain();
-        try self.createImageViews();
-        try self.createFrameBuffers();
+        // TODO: Cleaning up the current swap chain before creating a new one produces an issue
+        // where the old swap chain is expected to be used when creating the new one
+        // const old_swapchain = self.swapchain; pass into createSwapChain(), etc.
+        try cleanupSwapChain(self);
+        try createSwapChain(self);
+        try createImageViews(self);
+        try createFrameBuffers(self);
     }
 
     fn createSurface(self: *HelloTriangleApplication) !void {
@@ -1064,14 +1117,14 @@ const HelloTriangleApplication = struct {
     }
 
     fn createLogicalDevice(self: *HelloTriangleApplication) !void {
-        const indices = try findQueueFamilies(self, self.physical_device);
-        defer allocator.free(indices.slice);
+        const queue_family_indices = try findQueueFamilies(self, self.physical_device);
+        defer allocator.free(queue_family_indices.slice);
 
-        var queue_create_infos = try allocator.alloc(vk.DeviceQueueCreateInfo, indices.slice.len);
+        var queue_create_infos = try allocator.alloc(vk.DeviceQueueCreateInfo, queue_family_indices.slice.len);
         defer allocator.free(queue_create_infos);
         const queue_priority: [1]f32 = .{1};
 
-        for (indices.slice, 0..) |queue_family, i| {
+        for (queue_family_indices.slice, 0..) |queue_family, i| {
             queue_create_infos.ptr[i] = .{
                 .queue_family_index = queue_family,
                 .queue_count = 1,
@@ -1125,10 +1178,10 @@ const HelloTriangleApplication = struct {
         self.device = try vki.createDevice(self.physical_device, &create_info, null);
         vkd = try DeviceDispatch.load(self.device, vki.dispatch.vkGetDeviceProcAddr);
 
-        self.graphics_queue = vkd.getDeviceQueue(self.device, indices.graphics_family.?, 0);
-        self.present_queue = vkd.getDeviceQueue(self.device, indices.present_family.?, 0);
+        self.graphics_queue = vkd.getDeviceQueue(self.device, queue_family_indices.graphics_family.?, 0);
+        self.present_queue = vkd.getDeviceQueue(self.device, queue_family_indices.present_family.?, 0);
 
-        if (indices.transfer_family) |transfer_family| {
+        if (queue_family_indices.transfer_family) |transfer_family| {
             self.transfer_queue = vkd.getDeviceQueue(self.device, transfer_family, 0);
         }
     }
@@ -1172,8 +1225,8 @@ const HelloTriangleApplication = struct {
     }
 
     fn deviceIsSuitable(self: *HelloTriangleApplication, device: vk.PhysicalDevice) !bool {
-        const indices = try findQueueFamilies(self, device);
-        defer allocator.free(indices.slice);
+        const queue_family_indices = try findQueueFamilies(self, device);
+        defer allocator.free(queue_family_indices.slice);
 
         const extensions_supported = try checkDeviceExtensionSupport(device);
 
@@ -1187,8 +1240,8 @@ const HelloTriangleApplication = struct {
                 swap_chain_support.present_modes.len > 0;
         }
 
-        return indices.graphics_family != null and
-            indices.present_family != null and
+        return queue_family_indices.graphics_family != null and
+            queue_family_indices.present_family != null and
             extensions_supported and
             swap_chain_adequate;
     }
@@ -1225,7 +1278,7 @@ const HelloTriangleApplication = struct {
     }
 
     fn findQueueFamilies(self: *HelloTriangleApplication, device: vk.PhysicalDevice) !QueueFamilyIndices {
-        var indices: QueueFamilyIndices = .{};
+        var queue_family_indices: QueueFamilyIndices = .{};
 
         var queue_family_count: u32 = undefined;
         vki.getPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, null);
@@ -1238,22 +1291,22 @@ const HelloTriangleApplication = struct {
         var i: u32 = 0;
         for (queue_families) |family| {
             if (family.queue_flags.graphics_bit) {
-                indices.graphics_family = i;
+                queue_family_indices.graphics_family = i;
             }
 
             // NOTE: No queue families on my laptop have the transfer bit without the graphics bit
             if (!family.queue_flags.graphics_bit and family.queue_flags.transfer_bit) {
-                indices.transfer_family = i;
+                queue_family_indices.transfer_family = i;
             }
 
             const present_support = try vki.getPhysicalDeviceSurfaceSupportKHR(device, i, self.surface);
 
             if (present_support == vk.TRUE) {
-                indices.present_family = i;
+                queue_family_indices.present_family = i;
             }
 
-            if (indices.graphics_family != null and
-                indices.present_family != null)
+            if (queue_family_indices.graphics_family != null and
+                queue_family_indices.present_family != null)
             {
                 break;
             }
@@ -1284,37 +1337,37 @@ const HelloTriangleApplication = struct {
         // Here we store a slice of one or more unique indices for later use, ensuring we do not encounter
         // the above validation errors
         // TODO: This conditional is now a bit convoluted, can it be cleaned up?
-        if (indices.graphics_family) |graphics_family| {
-            if (indices.present_family) |present_family| {
-                if (indices.transfer_family) |transfer_family| {
+        if (queue_family_indices.graphics_family) |graphics_family| {
+            if (queue_family_indices.present_family) |present_family| {
+                if (queue_family_indices.transfer_family) |transfer_family| {
                     if (graphics_family == present_family) {
-                        indices.slice = try allocator.alloc(u32, 2);
-                        indices.slice[0] = graphics_family;
-                        indices.slice[1] = transfer_family;
+                        queue_family_indices.slice = try allocator.alloc(u32, 2);
+                        queue_family_indices.slice[0] = graphics_family;
+                        queue_family_indices.slice[1] = transfer_family;
                     } else if (transfer_family == present_family) {
-                        indices.slice = try allocator.alloc(u32, 2);
-                        indices.slice[0] = graphics_family;
-                        indices.slice[1] = transfer_family;
+                        queue_family_indices.slice = try allocator.alloc(u32, 2);
+                        queue_family_indices.slice[0] = graphics_family;
+                        queue_family_indices.slice[1] = transfer_family;
                     } else {
-                        indices.slice = try allocator.alloc(u32, 3);
-                        indices.slice[0] = graphics_family;
-                        indices.slice[1] = present_family;
-                        indices.slice[2] = transfer_family;
+                        queue_family_indices.slice = try allocator.alloc(u32, 3);
+                        queue_family_indices.slice[0] = graphics_family;
+                        queue_family_indices.slice[1] = present_family;
+                        queue_family_indices.slice[2] = transfer_family;
                     }
                 } else {
                     if (graphics_family == present_family) {
-                        indices.slice = try allocator.alloc(u32, 1);
-                        indices.slice[0] = graphics_family;
+                        queue_family_indices.slice = try allocator.alloc(u32, 1);
+                        queue_family_indices.slice[0] = graphics_family;
                     } else {
-                        indices.slice = try allocator.alloc(u32, 2);
-                        indices.slice[0] = graphics_family;
-                        indices.slice[1] = present_family;
+                        queue_family_indices.slice = try allocator.alloc(u32, 2);
+                        queue_family_indices.slice[0] = graphics_family;
+                        queue_family_indices.slice[1] = present_family;
                     }
                 }
             } else unreachable;
         } else unreachable;
 
-        return indices;
+        return queue_family_indices;
     }
 
     fn rateDeviceSuitability(device: vk.PhysicalDevice) i32 {
@@ -1493,8 +1546,10 @@ const HelloTriangleApplication = struct {
     }
 
     fn cleanup(self: *HelloTriangleApplication) void {
-        try self.cleanupSwapChain();
+        try cleanupSwapChain(self);
 
+        vkd.destroyBuffer(self.device, self.index_buffer, null);
+        vkd.freeMemory(self.device, self.index_buffer_memory, null);
         vkd.destroyBuffer(self.device, self.vertex_buffer, null);
         vkd.freeMemory(self.device, self.vertex_buffer_memory, null);
         vkd.destroyPipeline(self.device, self.graphics_pipeline, null);
