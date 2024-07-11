@@ -489,7 +489,7 @@ const HelloTriangleApplication = struct {
         try createSurface(self);
         try pickPhysicalDevice(self);
         try createLogicalDevice(self);
-        try createSwapChain(self);
+        try createSwapChain(self, .null_handle);
         try createImageViews(self);
         try createRenderPass(self);
         try createGraphicsPipeline(self);
@@ -1025,7 +1025,7 @@ const HelloTriangleApplication = struct {
         }
     }
 
-    fn createSwapChain(self: *HelloTriangleApplication) !void {
+    fn createSwapChain(self: *HelloTriangleApplication, old_swapchain: vk.SwapchainKHR) !void {
         const swap_chain_support = try querySwapChainSupport(self, self.physical_device);
         const surface_format = chooseSwapSurfaceFormat(swap_chain_support.formats);
         const present_mode = chooseSwapPresentMode(swap_chain_support.present_modes);
@@ -1051,7 +1051,7 @@ const HelloTriangleApplication = struct {
             .composite_alpha = .{ .opaque_bit_khr = true },
             .present_mode = present_mode,
             .clipped = vk.TRUE,
-            .old_swapchain = self.swap_chain,
+            .old_swapchain = old_swapchain,
         };
 
         const queue_family_indices = try findQueueFamilies(self, self.physical_device);
@@ -1075,7 +1075,7 @@ const HelloTriangleApplication = struct {
         self.swap_chain_extent = extent;
     }
 
-    fn cleanupSwapChain(self: *HelloTriangleApplication) !void {
+    fn cleanupSwapChain(self: *HelloTriangleApplication, old_swapchain: vk.SwapchainKHR) !void {
         for (self.swap_chain_framebuffers) |framebuffer| {
             vkd.destroyFramebuffer(self.device, framebuffer, null);
         }
@@ -1084,7 +1084,7 @@ const HelloTriangleApplication = struct {
             vkd.destroyImageView(self.device, image_view, null);
         }
 
-        vkd.destroySwapchainKHR(self.device, self.swap_chain, null);
+        vkd.destroySwapchainKHR(self.device, old_swapchain, null);
     }
 
     fn recreateSwapChain(self: *HelloTriangleApplication) !void {
@@ -1096,11 +1096,9 @@ const HelloTriangleApplication = struct {
         }
 
         try vkd.deviceWaitIdle(self.device);
-        // TODO: Cleaning up the current swap chain before creating a new one produces an issue
-        // where the old swap chain is expected to be used when creating the new one
-        // const old_swapchain = self.swapchain; pass into createSwapChain(), etc.
-        try cleanupSwapChain(self);
-        try createSwapChain(self);
+        const old_swapchain = self.swap_chain;
+        try createSwapChain(self, old_swapchain);
+        try cleanupSwapChain(self, old_swapchain);
         try createImageViews(self);
         try createFrameBuffers(self);
     }
@@ -1546,7 +1544,7 @@ const HelloTriangleApplication = struct {
     }
 
     fn cleanup(self: *HelloTriangleApplication) void {
-        try cleanupSwapChain(self);
+        try cleanupSwapChain(self, self.swap_chain);
 
         vkd.destroyBuffer(self.device, self.index_buffer, null);
         vkd.freeMemory(self.device, self.index_buffer_memory, null);
