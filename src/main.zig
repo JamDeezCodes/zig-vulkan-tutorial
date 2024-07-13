@@ -9,6 +9,7 @@ const frag = @embedFile("frag");
 
 const assert = std.debug.assert;
 
+const vertex = Vertex.init;
 const vec2 = mach.math.vec2;
 const vec3 = mach.math.vec3;
 const vec4 = mach.math.vec4;
@@ -84,6 +85,7 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .acquireNextImageKHR = true,
             .allocateCommandBuffers = true,
             .allocateMemory = true,
+            .allocateDescriptorSets = true,
             .beginCommandBuffer = true,
             .bindBufferMemory = true,
             .cmdBindPipeline = true,
@@ -96,6 +98,7 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .cmdDrawIndexed = true,
             .cmdEndRenderPass = true,
             .cmdCopyBuffer = true,
+            .cmdBindDescriptorSets = true,
             .createSwapchainKHR = true,
             .createImageView = true,
             .createShaderModule = true,
@@ -107,6 +110,8 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .createSemaphore = true,
             .createFence = true,
             .createBuffer = true,
+            .createDescriptorSetLayout = true,
+            .createDescriptorPool = true,
             .destroyDevice = true,
             .destroySwapchainKHR = true,
             .destroyImageView = true,
@@ -119,6 +124,8 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .destroySemaphore = true,
             .destroyFence = true,
             .destroyBuffer = true,
+            .destroyDescriptorSetLayout = true,
+            .destroyDescriptorPool = true,
             .deviceWaitIdle = true,
             .endCommandBuffer = true,
             .freeMemory = true,
@@ -133,6 +140,7 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .resetFences = true,
             .resetCommandBuffer = true,
             .unmapMemory = true,
+            .updateDescriptorSets = true,
             .waitForFences = true,
         },
     },
@@ -151,7 +159,11 @@ const SwapChainSupportDetails = struct {
     present_modes: []vk.PresentModeKHR,
 };
 
-const vertex = Vertex.init;
+const UniformBufferObject = struct {
+    model: Mat4x4,
+    view: Mat4x4,
+    proj: Mat4x4,
+};
 
 const Vertex = struct {
     pos: Vec2,
@@ -388,13 +400,13 @@ fn chooseSwapPresentMode(available_present_modes: []const vk.PresentModeKHR) vk.
 }
 
 fn chooseSwapExtent(
-    app: *HelloTriangleApplication,
+    window: glfw.Window,
     capabilities: *const vk.SurfaceCapabilitiesKHR,
 ) vk.Extent2D {
     if (capabilities.current_extent.width != std.math.maxInt(u32)) {
         return capabilities.current_extent;
     } else {
-        const size = app.window.getFramebufferSize();
+        const size = window.getFramebufferSize();
 
         var actual_extent = vk.Extent2D{ .width = size.width, .height = size.height };
 
@@ -415,7 +427,6 @@ fn chooseSwapExtent(
 
 const HelloTriangleApplication = struct {
     user_ptr: UserPointer = undefined,
-    window: *const glfw.Window = undefined,
     instance: vk.Instance = .null_handle,
     debug_messenger: vk.DebugUtilsMessengerEXT = .null_handle,
     physical_device: vk.PhysicalDevice = .null_handle,
@@ -430,6 +441,7 @@ const HelloTriangleApplication = struct {
     swap_chain_extent: vk.Extent2D = undefined,
     swap_chain_image_views: []vk.ImageView = undefined,
     render_pass: vk.RenderPass = .null_handle,
+    descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
     pipeline_layout: vk.PipelineLayout = .null_handle,
     graphics_pipeline: vk.Pipeline = .null_handle,
     swap_chain_framebuffers: []vk.Framebuffer = undefined,
@@ -444,17 +456,34 @@ const HelloTriangleApplication = struct {
     vertex_buffer_memory: vk.DeviceMemory = .null_handle,
     index_buffer: vk.Buffer = .null_handle,
     index_buffer_memory: vk.DeviceMemory = .null_handle,
+    uniform_buffers: []vk.Buffer = undefined,
+    uniform_buffer_memory: []vk.DeviceMemory = undefined,
+    uniform_buffers_mapped: []?*anyopaque = undefined,
+    timer: std.time.Timer = undefined,
+    descriptor_pool: vk.DescriptorPool = .null_handle,
+    descriptor_sets: []vk.DescriptorSet = undefined,
 
     pub fn run(self: *HelloTriangleApplication) !void {
-        initWindow(self);
-        try initVulkan(self);
+        self.timer = std.time.Timer{
+            .started = try std.time.Instant.now(),
+            .previous = try std.time.Instant.now(),
+        };
+
+        // NOTE: Storing a reference to the glfw window seems to cause all sorts of problems
+        // where the pointer is resolving to null and causing seg faults, so we pull it out
+        // here instead
+        const window = initWindow(self);
+        defer glfw.terminate();
+        defer window.destroy();
+        try initVulkan(self, window);
         defer cleanup(self);
-        try mainLoop(self);
+        try mainLoop(self, window);
     }
 
-    fn initWindow(self: *HelloTriangleApplication) void {
+    fn initWindow(self: *HelloTriangleApplication) glfw.Window {
         self.user_ptr = .{ .self = self };
 
+        glfw.setErrorCallback(errorCallback);
         if (!glfw.init(.{})) {
             std.log.err("failed to initialize GLFW: {?s}", .{glfw.getErrorString()});
             std.process.exit(1);
@@ -467,8 +496,7 @@ const HelloTriangleApplication = struct {
             std.process.exit(1);
         };
 
-        self.window = &glfw_window;
-        self.window.setUserPointer(&self.user_ptr);
+        glfw_window.setUserPointer(&self.user_ptr);
 
         const framebuffer_size_callback = struct {
             fn callback(window: glfw.Window, _: u32, _: u32) void {
@@ -477,28 +505,128 @@ const HelloTriangleApplication = struct {
             }
         }.callback;
 
-        self.window.setFramebufferSizeCallback(framebuffer_size_callback);
+        glfw_window.setFramebufferSizeCallback(framebuffer_size_callback);
+
+        return glfw_window;
     }
 
     // TODO: Consider a procedural refactoring of this struct and all its member functions, many of which
     // do not seem to see any reuse. Maybe a larger app would see some of these functions being called more
     // than once?
-    fn initVulkan(self: *HelloTriangleApplication) !void {
+    fn initVulkan(self: *HelloTriangleApplication, window: glfw.Window) !void {
         try createInstance(self);
         setupDebugMessenger(self);
-        try createSurface(self);
+        try createSurface(self, window);
         try pickPhysicalDevice(self);
         try createLogicalDevice(self);
-        try createSwapChain(self, .null_handle);
+        try createSwapChain(self, window, .null_handle);
         try createImageViews(self);
         try createRenderPass(self);
+        try createDescriptorSetLayout(self);
         try createGraphicsPipeline(self);
         try createFrameBuffers(self);
         try createCommandPool(self);
         try createVertexBuffer(self);
         try createIndexBuffer(self);
+        try createUniformBuffers(self);
+        try createDescriptorPool(self);
+        try createDescriptorSets(self);
         try createCommandBuffers(self);
         try createSyncObjects(self);
+    }
+
+    fn createDescriptorSets(self: *HelloTriangleApplication) !void {
+        const layouts = [_]vk.DescriptorSetLayout{ self.descriptor_set_layout, self.descriptor_set_layout };
+
+        const alloc_info = vk.DescriptorSetAllocateInfo{
+            .descriptor_pool = self.descriptor_pool,
+            .descriptor_set_count = max_frames_in_flight,
+            .p_set_layouts = &layouts,
+        };
+
+        self.descriptor_sets = try allocator.alloc(vk.DescriptorSet, max_frames_in_flight);
+
+        _ = try vkd.allocateDescriptorSets(self.device, &alloc_info, self.descriptor_sets.ptr);
+
+        for (0..max_frames_in_flight) |i| {
+            const buffer_info = vk.DescriptorBufferInfo{
+                .buffer = self.uniform_buffers[i],
+                .offset = 0,
+                .range = @sizeOf(UniformBufferObject),
+            };
+
+            const descriptor_write = vk.WriteDescriptorSet{
+                .dst_set = self.descriptor_sets[i],
+                .dst_binding = 0,
+                .dst_array_element = 0,
+                .descriptor_type = .uniform_buffer,
+                .descriptor_count = 1,
+                .p_buffer_info = @ptrCast(&buffer_info),
+                .p_image_info = undefined,
+                .p_texel_buffer_view = undefined,
+            };
+
+            vkd.updateDescriptorSets(self.device, 1, @ptrCast(&descriptor_write), 0, null);
+        }
+    }
+
+    fn createDescriptorPool(self: *HelloTriangleApplication) !void {
+        const pool_size = vk.DescriptorPoolSize{
+            .type = .uniform_buffer,
+            .descriptor_count = max_frames_in_flight,
+        };
+
+        const pool_info = vk.DescriptorPoolCreateInfo{
+            .pool_size_count = 1,
+            .p_pool_sizes = @ptrCast(&pool_size),
+            .max_sets = max_frames_in_flight,
+        };
+
+        self.descriptor_pool = try vkd.createDescriptorPool(self.device, &pool_info, null);
+    }
+
+    fn createUniformBuffers(self: *HelloTriangleApplication) !void {
+        const buffer_size = @sizeOf(UniformBufferObject);
+
+        self.uniform_buffers = try allocator.alloc(vk.Buffer, max_frames_in_flight);
+        self.uniform_buffer_memory = try allocator.alloc(vk.DeviceMemory, max_frames_in_flight);
+        self.uniform_buffers_mapped = try allocator.alloc(?*anyopaque, max_frames_in_flight);
+
+        for (0..max_frames_in_flight) |i| {
+            try createBuffer(
+                self,
+                buffer_size,
+                .{ .uniform_buffer_bit = true },
+                .{ .host_visible_bit = true, .host_coherent_bit = true },
+                &self.uniform_buffers[i],
+                &self.uniform_buffer_memory[i],
+            );
+
+            self.uniform_buffers_mapped[i] = try vkd.mapMemory(
+                self.device,
+                self.uniform_buffer_memory[i],
+                0,
+                buffer_size,
+                .{},
+            );
+        }
+    }
+
+    fn createDescriptorSetLayout(self: *HelloTriangleApplication) !void {
+        const ubo_layout_binding = vk.DescriptorSetLayoutBinding{
+            .binding = 0,
+            .descriptor_type = .uniform_buffer,
+            .descriptor_count = 1,
+            .stage_flags = .{ .vertex_bit = true },
+            .p_immutable_samplers = null,
+        };
+
+        var layout_info = vk.DescriptorSetLayoutCreateInfo{
+            .binding_count = 1,
+            .p_bindings = @ptrCast(&ubo_layout_binding),
+        };
+
+        self.descriptor_set_layout = try vkd.createDescriptorSetLayout(self.device, &layout_info, null);
     }
 
     fn findMemoryType(
@@ -734,6 +862,18 @@ const HelloTriangleApplication = struct {
         };
 
         vkd.cmdSetScissor(command_buffer, 0, 1, @ptrCast(&scissor));
+
+        vkd.cmdBindDescriptorSets(
+            command_buffer,
+            .graphics,
+            self.pipeline_layout,
+            0,
+            1,
+            @ptrCast(&self.descriptor_sets[current_frame]),
+            0,
+            null,
+        );
+
         vkd.cmdDrawIndexed(command_buffer, indices.len, 1, 0, 0, 0);
         vkd.cmdEndRenderPass(command_buffer);
         _ = try vkd.endCommandBuffer(command_buffer);
@@ -748,11 +888,11 @@ const HelloTriangleApplication = struct {
             .command_buffer_count = @intCast(self.command_buffers.len),
         };
 
-        _ = try vkd.allocateCommandBuffers(self.device, &alloc_info, @ptrCast(self.command_buffers.ptr));
+        _ = try vkd.allocateCommandBuffers(self.device, &alloc_info, self.command_buffers.ptr);
     }
 
     fn createCommandPool(self: *HelloTriangleApplication) !void {
-        const queue_family_indices = try self.findQueueFamilies(self.physical_device);
+        const queue_family_indices = try findQueueFamilies(self, self.physical_device);
 
         var pool_info = vk.CommandPoolCreateInfo{
             .flags = .{ .reset_command_buffer_bit = true },
@@ -875,7 +1015,7 @@ const HelloTriangleApplication = struct {
             .vertex_binding_description_count = 1,
             .p_vertex_binding_descriptions = @ptrCast(&binding_description),
             .vertex_attribute_description_count = @intCast(attribute_descriptions.len),
-            .p_vertex_attribute_descriptions = @ptrCast(attribute_descriptions.ptr),
+            .p_vertex_attribute_descriptions = attribute_descriptions.ptr,
         };
 
         const input_assembly = vk.PipelineInputAssemblyStateCreateInfo{
@@ -910,7 +1050,7 @@ const HelloTriangleApplication = struct {
             .polygon_mode = .fill,
             .line_width = 1,
             .cull_mode = .{ .back_bit = true },
-            .front_face = .clockwise,
+            .front_face = .counter_clockwise,
             .depth_bias_enable = vk.FALSE,
             .depth_bias_constant_factor = 0,
             .depth_bias_clamp = 0,
@@ -949,8 +1089,8 @@ const HelloTriangleApplication = struct {
         };
 
         const pipeline_layout_info = vk.PipelineLayoutCreateInfo{
-            .set_layout_count = 0,
-            .p_set_layouts = null,
+            .set_layout_count = 1,
+            .p_set_layouts = @ptrCast(&self.descriptor_set_layout),
             .push_constant_range_count = 0,
             .p_push_constant_ranges = null,
         };
@@ -1025,11 +1165,11 @@ const HelloTriangleApplication = struct {
         }
     }
 
-    fn createSwapChain(self: *HelloTriangleApplication, old_swapchain: vk.SwapchainKHR) !void {
+    fn createSwapChain(self: *HelloTriangleApplication, window: glfw.Window, old_swapchain: vk.SwapchainKHR) !void {
         const swap_chain_support = try querySwapChainSupport(self, self.physical_device);
         const surface_format = chooseSwapSurfaceFormat(swap_chain_support.formats);
         const present_mode = chooseSwapPresentMode(swap_chain_support.present_modes);
-        const extent = chooseSwapExtent(self, &swap_chain_support.capabilities);
+        const extent = chooseSwapExtent(window, &swap_chain_support.capabilities);
         var image_count = swap_chain_support.capabilities.min_image_count + 1;
 
         if (swap_chain_support.capabilities.max_image_count > 0 and
@@ -1060,7 +1200,7 @@ const HelloTriangleApplication = struct {
         if (queue_family_indices.graphics_family.? != queue_family_indices.present_family.?) {
             create_info.image_sharing_mode = .concurrent;
             create_info.queue_family_index_count = @intCast(queue_family_indices.slice.len);
-            create_info.p_queue_family_indices = @ptrCast(queue_family_indices.slice.ptr);
+            create_info.p_queue_family_indices = queue_family_indices.slice.ptr;
         } else {
             create_info.image_sharing_mode = .exclusive;
             create_info.queue_family_index_count = 0;
@@ -1087,26 +1227,26 @@ const HelloTriangleApplication = struct {
         vkd.destroySwapchainKHR(self.device, old_swapchain, null);
     }
 
-    fn recreateSwapChain(self: *HelloTriangleApplication) !void {
-        var size = self.window.getFramebufferSize();
+    fn recreateSwapChain(self: *HelloTriangleApplication, window: glfw.Window) !void {
+        var size = window.getFramebufferSize();
 
         while (size.width == 0 or size.height == 0) {
-            size = self.window.getFramebufferSize();
+            size = window.getFramebufferSize();
             glfw.waitEvents();
         }
 
         try vkd.deviceWaitIdle(self.device);
         const old_swapchain = self.swap_chain;
-        try createSwapChain(self, old_swapchain);
+        try createSwapChain(self, window, old_swapchain);
         try cleanupSwapChain(self, old_swapchain);
         try createImageViews(self);
         try createFrameBuffers(self);
     }
 
-    fn createSurface(self: *HelloTriangleApplication) !void {
+    fn createSurface(self: *HelloTriangleApplication, window: glfw.Window) !void {
         if (glfw.createWindowSurface(
             self.instance,
-            self.window.*,
+            window,
             null,
             &self.surface,
         ) != @intFromEnum(vk.Result.success)) {
@@ -1470,17 +1610,17 @@ const HelloTriangleApplication = struct {
         vki = try InstanceDispatch.load(self.instance, vkb.dispatch.vkGetInstanceProcAddr);
     }
 
-    fn mainLoop(self: *HelloTriangleApplication) !void {
-        while (!self.window.shouldClose()) {
+    fn mainLoop(self: *HelloTriangleApplication, window: glfw.Window) !void {
+        while (!window.shouldClose()) {
             glfw.pollEvents();
             // TODO: Figure out why calling drawFrame() on the pointer itself causes a seg fault
-            try drawFrame(self);
+            try drawFrame(self, window);
         }
 
         try vkd.deviceWaitIdle(self.device);
     }
 
-    fn drawFrame(self: *HelloTriangleApplication) !void {
+    fn drawFrame(self: *HelloTriangleApplication, window: glfw.Window) !void {
         _ = try vkd.waitForFences(self.device, 1, @ptrCast(&self.in_flight_fences[current_frame]), vk.TRUE, std.math.maxInt(u64));
 
         const image_result = try vkd.acquireNextImageKHR(
@@ -1492,7 +1632,7 @@ const HelloTriangleApplication = struct {
         );
 
         if (image_result.result == .error_out_of_date_khr) {
-            try self.recreateSwapChain();
+            try recreateSwapChain(self, window);
             return;
         } else if (image_result.result != .success and image_result.result != .suboptimal_khr) {
             @panic("failed to acquire swap chain image!");
@@ -1500,7 +1640,9 @@ const HelloTriangleApplication = struct {
 
         _ = try vkd.resetFences(self.device, 1, @ptrCast(&self.in_flight_fences[current_frame]));
         _ = try vkd.resetCommandBuffer(self.command_buffers[current_frame], .{});
-        _ = try self.recordCommandBuffer(self.command_buffers[current_frame], image_result.image_index);
+        _ = try recordCommandBuffer(self, self.command_buffers[current_frame], image_result.image_index);
+
+        try updateUniformBuffer(self, current_frame);
 
         const wait_semaphores = [_]vk.Semaphore{self.image_available_semaphores[current_frame]};
         const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
@@ -1535,7 +1677,7 @@ const HelloTriangleApplication = struct {
             self.framebuffer_resized)
         {
             self.framebuffer_resized = false;
-            try self.recreateSwapChain();
+            try recreateSwapChain(self, window);
         } else if (present_result != .success) {
             @panic("failed to present swap chain image");
         }
@@ -1543,9 +1685,37 @@ const HelloTriangleApplication = struct {
         current_frame = (current_frame + 1) % max_frames_in_flight;
     }
 
+    fn updateUniformBuffer(self: *HelloTriangleApplication, current_image: u32) !void {
+        const time = self.timer.read() / std.time.ns_per_s;
+
+        // TODO: This UBO is not accurate to the tutorial, but at least lets us see the
+        // rectangle rotating 90 degrees every second, as expected
+        var ubo = UniformBufferObject{
+            .model = Mat4x4.rotateZ(@as(f32, @floatFromInt(time)) * std.math.pi / 2),
+            .view = Mat4x4.scaleScalar(0.5),
+            .proj = Mat4x4.ident,
+        };
+
+        ubo.proj.v[1].v[1] *= -1;
+
+        if (self.uniform_buffers_mapped[current_image]) |data| {
+            @memcpy(
+                @as([*]u8, @ptrCast(data))[0..@sizeOf(UniformBufferObject)],
+                @as([*]u8, @ptrCast(&ubo)),
+            );
+        }
+    }
+
     fn cleanup(self: *HelloTriangleApplication) void {
         try cleanupSwapChain(self, self.swap_chain);
 
+        for (0..max_frames_in_flight) |i| {
+            vkd.destroyBuffer(self.device, self.uniform_buffers[i], null);
+            vkd.freeMemory(self.device, self.uniform_buffer_memory[i], null);
+        }
+
+        vkd.destroyDescriptorPool(self.device, self.descriptor_pool, null);
+        vkd.destroyDescriptorSetLayout(self.device, self.descriptor_set_layout, null);
         vkd.destroyBuffer(self.device, self.index_buffer, null);
         vkd.freeMemory(self.device, self.index_buffer_memory, null);
         vkd.destroyBuffer(self.device, self.vertex_buffer, null);
@@ -1564,6 +1734,10 @@ const HelloTriangleApplication = struct {
         allocator.free(self.image_available_semaphores);
         allocator.free(self.render_finished_semaphores);
         allocator.free(self.in_flight_fences);
+        allocator.free(self.uniform_buffers);
+        allocator.free(self.uniform_buffer_memory);
+        allocator.free(self.uniform_buffers_mapped);
+        allocator.free(self.descriptor_sets);
 
         vkd.destroyCommandPool(self.device, self.command_pool, null);
         vkd.destroyDevice(self.device, null);
@@ -1578,9 +1752,6 @@ const HelloTriangleApplication = struct {
 
         vki.destroySurfaceKHR(self.instance, self.surface, null);
         vki.destroyInstance(self.instance, null);
-        // TODO: Why does produce an illegal instruction at address error?
-        self.window.destroy();
-        glfw.terminate();
     }
 
     fn debugCallback(
