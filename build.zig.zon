@@ -27,6 +27,10 @@
             .url = "https://github.com/JolliestJames/mach/archive/b72f0e11b6d292c2b60789359a61f7ee6d7dc371.tar.gz",
             .hash = "122015e1dac4afaf275f7f2adde3814e6a27f5799cbef96bb487ee305f7e33f4dca3",
         },
+        .zigimg = .{
+            .url = "https://github.com/zigimg/zigimg/archive/d9dbbe22b5f7b5f1f4772169ed93ffeed8e8124d.tar.gz",
+            .hash = "122013646f7038ecc71ddf8a0d7de346d29a6ec40140af57f838b0a975c69af512b0",
+        },
     },
     .paths = .{
         "build.zig",

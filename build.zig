@@ -15,6 +15,10 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    const textures = b.addModule("textures", .{
+        .root_source_file = b.path("textures/main.zig"),
+    });
+
     const lib = b.addStaticLibrary(.{
         .name = "zig-vulkan-tutorial",
         // In this case the main source file is merely a path, however, in more
@@ -77,6 +81,15 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("mach", mach_dep.module("mach"));
 
     @import("mach").link(mach_dep.builder, exe);
+
+    exe.root_module.addImport("textures", textures);
+
+    // Add zigimg to our library and executable
+    const zigimg_dep = b.dependency("zigimg", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("zigimg", zigimg_dep.module("zigimg"));
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
