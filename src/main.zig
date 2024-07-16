@@ -118,6 +118,7 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .createDescriptorSetLayout = true,
             .createDescriptorPool = true,
             .createImage = true,
+            .createSampler = true,
             .destroyDevice = true,
             .destroySwapchainKHR = true,
             .destroyImageView = true,
@@ -133,6 +134,7 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .destroyDescriptorSetLayout = true,
             .destroyDescriptorPool = true,
             .destroyImage = true,
+            .destroySampler = true,
             .deviceWaitIdle = true,
             .endCommandBuffer = true,
             .freeMemory = true,
@@ -472,6 +474,8 @@ const HelloTriangleApplication = struct {
     descriptor_sets: []vk.DescriptorSet = undefined,
     texture_image: vk.Image = .null_handle,
     texture_image_memory: vk.DeviceMemory = .null_handle,
+    texture_image_view: vk.ImageView = .null_handle,
+    texture_sampler: vk.Sampler = .null_handle,
 
     pub fn run(self: *HelloTriangleApplication) !void {
         self.timer = std.time.Timer{
@@ -537,6 +541,8 @@ const HelloTriangleApplication = struct {
         try createFrameBuffers(self);
         try createCommandPool(self);
         try createTextureImage(self);
+        try createTextureImageView(self);
+        try createTextureSampler(self);
         try createVertexBuffer(self);
         try createIndexBuffer(self);
         try createUniformBuffers(self);
@@ -544,6 +550,54 @@ const HelloTriangleApplication = struct {
         try createDescriptorSets(self);
         try createCommandBuffers(self);
         try createSyncObjects(self);
+    }
+
+    fn createTextureSampler(self: *HelloTriangleApplication) !void {
+        const properties = vki.getPhysicalDeviceProperties(self.physical_device);
+
+        const sampler_info = vk.SamplerCreateInfo{
+            .mag_filter = .linear,
+            .min_filter = .linear,
+            .address_mode_u = .repeat,
+            .address_mode_v = .repeat,
+            .address_mode_w = .repeat,
+            .anisotropy_enable = vk.TRUE,
+            .max_anisotropy = properties.limits.max_sampler_anisotropy,
+            .border_color = .int_opaque_black,
+            .unnormalized_coordinates = vk.FALSE,
+            .compare_enable = vk.FALSE,
+            .compare_op = .always,
+            .mipmap_mode = .linear,
+            .mip_lod_bias = 0,
+            .min_lod = 0,
+            .max_lod = 0,
+        };
+
+        self.texture_sampler = try vkd.createSampler(self.device, &sampler_info, null);
+    }
+
+    fn createImageView(self: *HelloTriangleApplication, image: vk.Image, format: vk.Format) !vk.ImageView {
+        const view_info = vk.ImageViewCreateInfo{
+            .image = image,
+            .view_type = .@"2d",
+            .format = format,
+            .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+            .subresource_range = .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        };
+
+        const result = try vkd.createImageView(self.device, &view_info, null);
+
+        return result;
+    }
+
+    fn createTextureImageView(self: *HelloTriangleApplication) !void {
+        self.texture_image_view = try createImageView(self, self.texture_image, .r8g8b8a8_srgb);
     }
 
     fn copyBufferToImage(
@@ -1347,26 +1401,7 @@ const HelloTriangleApplication = struct {
         self.swap_chain_image_views = try allocator.alloc(vk.ImageView, self.swap_chain_images.len);
 
         for (self.swap_chain_images, self.swap_chain_image_views) |image, *image_view| {
-            var create_info = vk.ImageViewCreateInfo{
-                .image = image,
-                .view_type = .@"2d",
-                .format = self.swap_chain_image_format,
-                .components = .{
-                    .r = .identity,
-                    .g = .identity,
-                    .b = .identity,
-                    .a = .identity,
-                },
-                .subresource_range = .{
-                    .aspect_mask = .{ .color_bit = true },
-                    .base_mip_level = 0,
-                    .level_count = 1,
-                    .base_array_layer = 0,
-                    .layer_count = 1,
-                },
-            };
-
-            image_view.* = try vkd.createImageView(self.device, &create_info, null);
+            image_view.* = try createImageView(self, image, self.swap_chain_image_format);
         }
     }
 
@@ -1475,7 +1510,7 @@ const HelloTriangleApplication = struct {
             };
         }
 
-        const device_features: vk.PhysicalDeviceFeatures = .{};
+        const device_features: vk.PhysicalDeviceFeatures = .{ .sampler_anisotropy = vk.TRUE };
 
         var create_info: vk.DeviceCreateInfo = .{
             .queue_create_info_count = @intCast(queue_create_infos.len),
@@ -1583,10 +1618,13 @@ const HelloTriangleApplication = struct {
                 swap_chain_support.present_modes.len > 0;
         }
 
+        const supported_features = vki.getPhysicalDeviceFeatures(device);
+
         return queue_family_indices.graphics_family != null and
             queue_family_indices.present_family != null and
             extensions_supported and
-            swap_chain_adequate;
+            swap_chain_adequate and
+            supported_features.sampler_anisotropy == vk.TRUE;
     }
 
     fn checkDeviceExtensionSupport(device: vk.PhysicalDevice) !bool {
@@ -1914,6 +1952,8 @@ const HelloTriangleApplication = struct {
     fn cleanup(self: *HelloTriangleApplication) void {
         try cleanupSwapChain(self, self.swap_chain);
 
+        vkd.destroySampler(self.device, self.texture_sampler, null);
+        vkd.destroyImageView(self.device, self.texture_image_view, null);
         vkd.destroyImage(self.device, self.texture_image, null);
         vkd.freeMemory(self.device, self.texture_image_memory, null);
 
