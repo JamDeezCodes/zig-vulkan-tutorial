@@ -178,9 +178,10 @@ const UniformBufferObject = struct {
 const Vertex = struct {
     pos: Vec2,
     color: Vec3,
+    texture_xy: Vec2,
 
-    pub fn init(pos: Vec2, color: Vec3) Vertex {
-        return .{ .pos = pos, .color = color };
+    pub fn init(pos: Vec2, color: Vec3, texture_xy: Vec2) Vertex {
+        return .{ .pos = pos, .color = color, .texture_xy = texture_xy };
     }
 
     fn getBindingDescription() vk.VertexInputBindingDescription {
@@ -194,7 +195,7 @@ const Vertex = struct {
     }
 
     fn getAttributeDescriptions() ![]vk.VertexInputAttributeDescription {
-        var result = try allocator.alloc(vk.VertexInputAttributeDescription, 2);
+        var result = try allocator.alloc(vk.VertexInputAttributeDescription, 3);
 
         result[0].binding = 0;
         result[0].location = 0;
@@ -206,15 +207,20 @@ const Vertex = struct {
         result[1].format = .r32g32b32_sfloat;
         result[1].offset = @offsetOf(Vertex, "color");
 
+        result[2].binding = 0;
+        result[2].location = 2;
+        result[2].format = .r32g32_sfloat;
+        result[2].offset = @offsetOf(Vertex, "texture_xy");
+
         return result;
     }
 };
 
 var vertices = [_]Vertex{
-    vertex(vec2(-0.5, -0.5), vec3(1, 0, 0)),
-    vertex(vec2(0.5, -0.5), vec3(0, 1, 0)),
-    vertex(vec2(0.5, 0.5), vec3(0, 0, 1)),
-    vertex(vec2(-0.5, 0.5), vec3(1, 1, 1)),
+    vertex(vec2(-0.5, -0.5), vec3(1, 0, 0), vec2(1, 0)),
+    vertex(vec2(0.5, -0.5), vec3(0, 1, 0), vec2(0, 0)),
+    vertex(vec2(0.5, 0.5), vec3(0, 0, 1), vec2(0, 1)),
+    vertex(vec2(-0.5, 0.5), vec3(1, 1, 1), vec2(1, 1)),
 };
 
 var indices = [_]u16{ 0, 1, 2, 2, 3, 0 };
@@ -797,30 +803,54 @@ const HelloTriangleApplication = struct {
                 .range = @sizeOf(UniformBufferObject),
             };
 
-            const descriptor_write = vk.WriteDescriptorSet{
-                .dst_set = self.descriptor_sets[i],
-                .dst_binding = 0,
-                .dst_array_element = 0,
-                .descriptor_type = .uniform_buffer,
-                .descriptor_count = 1,
-                .p_buffer_info = @ptrCast(&buffer_info),
-                .p_image_info = undefined,
-                .p_texel_buffer_view = undefined,
+            const image_info = vk.DescriptorImageInfo{
+                .image_layout = .shader_read_only_optimal,
+                .image_view = self.texture_image_view,
+                .sampler = self.texture_sampler,
             };
 
-            vkd.updateDescriptorSets(self.device, 1, @ptrCast(&descriptor_write), 0, null);
+            const descriptor_writes = [_]vk.WriteDescriptorSet{
+                .{
+                    .dst_set = self.descriptor_sets[i],
+                    .dst_binding = 0,
+                    .dst_array_element = 0,
+                    .descriptor_type = .uniform_buffer,
+                    .descriptor_count = 1,
+                    .p_buffer_info = @ptrCast(&buffer_info),
+                    .p_image_info = undefined,
+                    .p_texel_buffer_view = undefined,
+                },
+                .{
+                    .dst_set = self.descriptor_sets[i],
+                    .dst_binding = 1,
+                    .dst_array_element = 0,
+                    .descriptor_type = .combined_image_sampler,
+                    .descriptor_count = 1,
+                    .p_buffer_info = undefined,
+                    .p_image_info = @ptrCast(&image_info),
+                    .p_texel_buffer_view = undefined,
+                },
+            };
+
+            vkd.updateDescriptorSets(self.device, descriptor_writes.len, &descriptor_writes, 0, null);
         }
     }
 
     fn createDescriptorPool(self: *HelloTriangleApplication) !void {
-        const pool_size = vk.DescriptorPoolSize{
-            .type = .uniform_buffer,
-            .descriptor_count = max_frames_in_flight,
+        const pool_sizes = [_]vk.DescriptorPoolSize{
+            .{
+                .type = .uniform_buffer,
+                .descriptor_count = max_frames_in_flight,
+            },
+            .{
+                .type = .combined_image_sampler,
+                .descriptor_count = max_frames_in_flight,
+            },
         };
 
         const pool_info = vk.DescriptorPoolCreateInfo{
-            .pool_size_count = 1,
-            .p_pool_sizes = @ptrCast(&pool_size),
+            .pool_size_count = pool_sizes.len,
+            .p_pool_sizes = &pool_sizes,
             .max_sets = max_frames_in_flight,
         };
 
@@ -863,9 +893,19 @@ const HelloTriangleApplication = struct {
             .p_immutable_samplers = null,
         };
 
+        const sampler_layout_binding = vk.DescriptorSetLayoutBinding{
+            .binding = 1,
+            .descriptor_count = 1,
+            .descriptor_type = .combined_image_sampler,
+            .p_immutable_samplers = null,
+            .stage_flags = .{ .fragment_bit = true },
+        };
+
+        const bindings = [_]vk.DescriptorSetLayoutBinding{ ubo_layout_binding, sampler_layout_binding };
+
         var layout_info = vk.DescriptorSetLayoutCreateInfo{
-            .binding_count = 1,
-            .p_bindings = @ptrCast(&ubo_layout_binding),
+            .binding_count = bindings.len,
+            .p_bindings = &bindings,
         };
 
         self.descriptor_set_layout = try vkd.createDescriptorSetLayout(self.device, &layout_info, null);
