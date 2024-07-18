@@ -67,6 +67,7 @@ const InstanceDispatch = vk.InstanceWrapper(&.{
             .enumeratePhysicalDevices = true,
             .enumerateDeviceExtensionProperties = true,
             .getPhysicalDeviceProperties = true,
+            .getPhysicalDeviceFormatProperties = true,
             .getPhysicalDeviceFeatures = true,
             .getPhysicalDeviceQueueFamilyProperties = true,
             .getPhysicalDeviceSurfaceSupportKHR = true,
@@ -176,11 +177,11 @@ const UniformBufferObject = struct {
 };
 
 const Vertex = struct {
-    pos: Vec2,
+    pos: Vec3,
     color: Vec3,
     texture_xy: Vec2,
 
-    pub fn init(pos: Vec2, color: Vec3, texture_xy: Vec2) Vertex {
+    pub fn init(pos: Vec3, color: Vec3, texture_xy: Vec2) Vertex {
         return .{ .pos = pos, .color = color, .texture_xy = texture_xy };
     }
 
@@ -199,7 +200,7 @@ const Vertex = struct {
 
         result[0].binding = 0;
         result[0].location = 0;
-        result[0].format = .r32g32_sfloat;
+        result[0].format = .r32g32b32_sfloat;
         result[0].offset = @offsetOf(Vertex, "pos");
 
         result[1].binding = 0;
@@ -217,13 +218,18 @@ const Vertex = struct {
 };
 
 var vertices = [_]Vertex{
-    vertex(vec2(-0.5, -0.5), vec3(1, 0, 0), vec2(1, 0)),
-    vertex(vec2(0.5, -0.5), vec3(0, 1, 0), vec2(0, 0)),
-    vertex(vec2(0.5, 0.5), vec3(0, 0, 1), vec2(0, 1)),
-    vertex(vec2(-0.5, 0.5), vec3(1, 1, 1), vec2(1, 1)),
+    vertex(vec3(-0.5, -0.5, 0), vec3(1, 0, 0), vec2(0, 0)),
+    vertex(vec3(0.5, -0.5, 0), vec3(0, 1, 0), vec2(1, 0)),
+    vertex(vec3(0.5, 0.5, 0), vec3(0, 0, 1), vec2(1, 1)),
+    vertex(vec3(-0.5, 0.5, 0), vec3(1, 1, 1), vec2(0, 1)),
+
+    vertex(vec3(-0.5, -0.5, -0.5), vec3(1, 0, 0), vec2(0, 0)),
+    vertex(vec3(0.5, -0.5, -0.5), vec3(0, 1, 0), vec2(1, 0)),
+    vertex(vec3(0.5, 0.5, -0.5), vec3(0, 0, 1), vec2(1, 1)),
+    vertex(vec3(-0.5, 0.5, -0.5), vec3(1, 1, 1), vec2(0, 1)),
 };
 
-var indices = [_]u16{ 0, 1, 2, 2, 3, 0 };
+var indices = [_]u16{ 0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4 };
 
 fn printAvailableExtensions(available_extensions: []vk.ExtensionProperties) void {
     std.debug.print("available extensions:\n", .{});
@@ -482,6 +488,9 @@ const HelloTriangleApplication = struct {
     texture_image_memory: vk.DeviceMemory = .null_handle,
     texture_image_view: vk.ImageView = .null_handle,
     texture_sampler: vk.Sampler = .null_handle,
+    depth_image: vk.Image = .null_handle,
+    depth_image_memory: vk.DeviceMemory = .null_handle,
+    depth_image_view: vk.ImageView = .null_handle,
 
     pub fn run(self: *HelloTriangleApplication) !void {
         self.timer = std.time.Timer{
@@ -544,8 +553,9 @@ const HelloTriangleApplication = struct {
         try createRenderPass(self);
         try createDescriptorSetLayout(self);
         try createGraphicsPipeline(self);
-        try createFrameBuffers(self);
         try createCommandPool(self);
+        try createDepthResources(self);
+        try createFramebuffers(self);
         try createTextureImage(self);
         try createTextureImageView(self);
         try createTextureSampler(self);
@@ -556,6 +566,60 @@ const HelloTriangleApplication = struct {
         try createDescriptorSets(self);
         try createCommandBuffers(self);
         try createSyncObjects(self);
+    }
+
+    fn createDepthResources(self: *HelloTriangleApplication) !void {
+        const depth_format = findDepthFormat(self);
+
+        try createImage(
+            self,
+            self.swap_chain_extent.width,
+            self.swap_chain_extent.height,
+            depth_format,
+            .optimal,
+            .{ .depth_stencil_attachment_bit = true },
+            .{ .device_local_bit = true },
+            &self.depth_image,
+            &self.depth_image_memory,
+        );
+
+        self.depth_image_view = try createImageView(self, self.depth_image, depth_format, .{ .depth_bit = true });
+
+        try transitionImageLayout(self, self.depth_image, depth_format, .undefined, .depth_stencil_attachment_optimal);
+    }
+
+    fn findSupportedFormat(
+        self: *HelloTriangleApplication,
+        candidates: []vk.Format,
+        tiling: vk.ImageTiling,
+        features: vk.FormatFeatureFlags,
+    ) vk.Format {
+        for (candidates) |format| {
+            const props = vki.getPhysicalDeviceFormatProperties(self.physical_device, format);
+
+            if (tiling == .linear and props.linear_tiling_features.contains(features)) {
+                return format;
+            } else if (tiling == .optimal and props.optimal_tiling_features.contains(features)) {
+                return format;
+            }
+        }
+
+        @panic("failed to find supported format!");
+    }
+
+    fn findDepthFormat(self: *HelloTriangleApplication) vk.Format {
+        var candidates = [_]vk.Format{ .d32_sfloat, .d32_sfloat_s8_uint, .d24_unorm_s8_uint };
+
+        return findSupportedFormat(
+            self,
+            @ptrCast(&candidates),
+            .optimal,
+            .{ .depth_stencil_attachment_bit = true },
+        );
+    }
+
+    fn hasStencilComponent(format: vk.Format) bool {
+        return format == .d32_sfloat_s8_uint or format == .d24_unorm_s8_uint;
     }
 
     fn createTextureSampler(self: *HelloTriangleApplication) !void {
@@ -582,14 +646,19 @@ const HelloTriangleApplication = struct {
         self.texture_sampler = try vkd.createSampler(self.device, &sampler_info, null);
     }
 
-    fn createImageView(self: *HelloTriangleApplication, image: vk.Image, format: vk.Format) !vk.ImageView {
+    fn createImageView(
+        self: *HelloTriangleApplication,
+        image: vk.Image,
+        format: vk.Format,
+        aspect_flags: vk.ImageAspectFlags,
+    ) !vk.ImageView {
         const view_info = vk.ImageViewCreateInfo{
             .image = image,
             .view_type = .@"2d",
             .format = format,
             .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
             .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
+                .aspect_mask = aspect_flags,
                 .base_mip_level = 0,
                 .level_count = 1,
                 .base_array_layer = 0,
@@ -603,7 +672,7 @@ const HelloTriangleApplication = struct {
     }
 
     fn createTextureImageView(self: *HelloTriangleApplication) !void {
-        self.texture_image_view = try createImageView(self, self.texture_image, .r8g8b8a8_srgb);
+        self.texture_image_view = try createImageView(self, self.texture_image, .r8g8b8a8_srgb, .{ .color_bit = true });
     }
 
     fn copyBufferToImage(
@@ -668,6 +737,16 @@ const HelloTriangleApplication = struct {
         var source_stage = vk.PipelineStageFlags{};
         var destination_stage = vk.PipelineStageFlags{};
 
+        if (new_layout == .depth_stencil_attachment_optimal) {
+            barrier.subresource_range.aspect_mask = .{ .depth_bit = true };
+
+            if (hasStencilComponent(format)) {
+                barrier.subresource_range.aspect_mask.stencil_bit = true;
+            }
+        } else {
+            barrier.subresource_range.aspect_mask = .{ .color_bit = true };
+        }
+
         if (old_layout == .undefined and new_layout == .transfer_dst_optimal) {
             barrier.src_access_mask = .{};
             barrier.dst_access_mask = .{ .transfer_write_bit = true };
@@ -679,6 +758,15 @@ const HelloTriangleApplication = struct {
 
             source_stage = .{ .transfer_bit = true };
             destination_stage = .{ .fragment_shader_bit = true };
+        } else if (old_layout == .undefined and new_layout == .depth_stencil_attachment_optimal) {
+            barrier.src_access_mask = .{};
+            barrier.dst_access_mask = .{
+                .depth_stencil_attachment_read_bit = true,
+                .depth_stencil_attachment_write_bit = true,
+            };
+
+            source_stage = .{ .top_of_pipe_bit = true };
+            destination_stage = .{ .early_fragment_tests_bit = true };
         } else {
             @panic("unsupported layout transition!");
         }
@@ -695,8 +783,6 @@ const HelloTriangleApplication = struct {
             1,
             @ptrCast(&barrier),
         );
-
-        _ = format;
 
         try endSingleTimeCommands(self, command_buffer);
     }
@@ -728,7 +814,7 @@ const HelloTriangleApplication = struct {
 
         image.* = try vkd.createImage(self.device, &image_info, null);
 
-        const mem_requirements = vkd.getImageMemoryRequirements(self.device, self.texture_image);
+        const mem_requirements = vkd.getImageMemoryRequirements(self.device, image.*);
 
         var alloc_info = vk.MemoryAllocateInfo{
             .allocation_size = mem_requirements.size,
@@ -736,7 +822,7 @@ const HelloTriangleApplication = struct {
         };
 
         image_memory.* = try vkd.allocateMemory(self.device, &alloc_info, null);
-        _ = try vkd.bindImageMemory(self.device, self.texture_image, self.texture_image_memory, 0);
+        _ = try vkd.bindImageMemory(self.device, image.*, image_memory.*, 0);
     }
 
     fn createTextureImage(self: *HelloTriangleApplication) !void {
@@ -921,16 +1007,10 @@ const HelloTriangleApplication = struct {
         for (0..mem_properties.memory_type_count) |i| {
             const flags = mem_properties.memory_types[i].property_flags;
 
-            if ((type_filter & (@as(u64, @intCast(1)) << @intCast(i))) > 0) {
-                if (properties.device_local_bit and flags.device_local_bit) {
-                    return @intCast(i);
-                }
-
-                if (properties.host_coherent_bit and flags.host_coherent_bit and
-                    properties.host_visible_bit and flags.host_visible_bit)
-                {
-                    return @intCast(i);
-                }
+            if ((type_filter & (@as(u64, @intCast(1)) << @intCast(i))) > 0 and
+                flags.contains(properties))
+            {
+                return @intCast(i);
             }
         }
 
@@ -1128,12 +1208,21 @@ const HelloTriangleApplication = struct {
 
         _ = try vkd.beginCommandBuffer(command_buffer, &begin_info);
 
+        const clear_values = [_]vk.ClearValue{
+            .{
+                .color = .{ .float_32 = .{ 0, 0, 0, 1 } },
+            },
+            .{
+                .depth_stencil = .{ .depth = 1, .stencil = 0 },
+            },
+        };
+
         var render_pass_info = vk.RenderPassBeginInfo{
             .render_pass = self.render_pass,
             .framebuffer = self.swap_chain_framebuffers[image_index],
             .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = self.swap_chain_extent },
-            .clear_value_count = 1,
-            .p_clear_values = @ptrCast(&vk.ClearValue{ .color = .{ .float_32 = .{ 0, 0, 0, 1 } } }),
+            .clear_value_count = clear_values.len,
+            .p_clear_values = &clear_values,
         };
 
         vkd.cmdBeginRenderPass(command_buffer, &render_pass_info, .@"inline");
@@ -1210,14 +1299,16 @@ const HelloTriangleApplication = struct {
         }
     }
 
-    fn createFrameBuffers(self: *HelloTriangleApplication) !void {
+    fn createFramebuffers(self: *HelloTriangleApplication) !void {
         self.swap_chain_framebuffers = try allocator.alloc(vk.Framebuffer, self.swap_chain_image_views.len);
 
         for (self.swap_chain_image_views, self.swap_chain_framebuffers) |image_view, *framebuffer| {
+            const attachments = [_]vk.ImageView{ image_view, self.depth_image_view };
+
             const framebuffer_info = vk.FramebufferCreateInfo{
                 .render_pass = self.render_pass,
-                .attachment_count = 1,
-                .p_attachments = &.{image_view},
+                .attachment_count = attachments.len,
+                .p_attachments = &attachments,
                 .width = self.swap_chain_extent.width,
                 .height = self.swap_chain_extent.height,
                 .layers = 1,
@@ -1239,29 +1330,48 @@ const HelloTriangleApplication = struct {
             .final_layout = .present_src_khr,
         };
 
+        const depth_attachment = vk.AttachmentDescription{
+            .format = findDepthFormat(self),
+            .samples = .{ .@"1_bit" = true },
+            .load_op = .clear,
+            .store_op = .dont_care,
+            .stencil_load_op = .dont_care,
+            .stencil_store_op = .dont_care,
+            .initial_layout = .undefined,
+            .final_layout = .depth_stencil_attachment_optimal,
+        };
+
         const color_attachment_ref = vk.AttachmentReference{
             .attachment = 0,
             .layout = .color_attachment_optimal,
+        };
+
+        const depth_attachment_ref = vk.AttachmentReference{
+            .attachment = 1,
+            .layout = .depth_stencil_attachment_optimal,
         };
 
         const subpass = vk.SubpassDescription{
             .pipeline_bind_point = .graphics,
             .color_attachment_count = 1,
             .p_color_attachments = &.{color_attachment_ref},
+            .p_depth_stencil_attachment = &depth_attachment_ref,
         };
 
         const dependency = vk.SubpassDependency{
             .src_subpass = vk.SUBPASS_EXTERNAL,
             .dst_subpass = 0,
-            .src_stage_mask = .{ .color_attachment_output_bit = true },
+            .src_stage_mask = .{ .color_attachment_output_bit = true, .early_fragment_tests_bit = true },
             .src_access_mask = .{},
-            .dst_stage_mask = .{ .color_attachment_output_bit = true },
-            .dst_access_mask = .{ .color_attachment_write_bit = true },
+            .dst_stage_mask = .{ .color_attachment_output_bit = true, .early_fragment_tests_bit = true },
+            .dst_access_mask = .{ .color_attachment_write_bit = true, .depth_stencil_attachment_write_bit = true },
         };
 
+        const attachments = [_]vk.AttachmentDescription{ color_attachment, depth_attachment };
+
         const render_pass_info = vk.RenderPassCreateInfo{
-            .attachment_count = 1,
-            .p_attachments = &.{color_attachment},
+            .attachment_count = attachments.len,
+            .p_attachments = &attachments,
             .subpass_count = 1,
             .p_subpasses = &.{subpass},
             .dependency_count = 1,
@@ -1396,6 +1506,34 @@ const HelloTriangleApplication = struct {
 
         self.pipeline_layout = try vkd.createPipelineLayout(self.device, &pipeline_layout_info, null);
 
+        const depth_stencil = vk.PipelineDepthStencilStateCreateInfo{
+            .depth_test_enable = vk.TRUE,
+            .depth_write_enable = vk.TRUE,
+            .depth_compare_op = .less,
+            .depth_bounds_test_enable = vk.FALSE,
+            .min_depth_bounds = 0,
+            .max_depth_bounds = 0,
+            .stencil_test_enable = vk.FALSE,
+            .front = .{
+                .fail_op = .zero,
+                .pass_op = .zero,
+                .depth_fail_op = .zero,
+                .compare_op = .never,
+                .write_mask = 0,
+                .compare_mask = 0,
+                .reference = 0,
+            },
+            .back = .{
+                .fail_op = .zero,
+                .pass_op = .zero,
+                .depth_fail_op = .zero,
+                .compare_op = .never,
+                .write_mask = 0,
+                .compare_mask = 0,
+                .reference = 0,
+            },
+        };
+
         const pipeline_info = vk.GraphicsPipelineCreateInfo{
             .stage_count = 2,
             .p_stages = &shader_stages,
@@ -1404,7 +1542,7 @@ const HelloTriangleApplication = struct {
             .p_viewport_state = &viewport_state,
             .p_rasterization_state = &rasterizer,
             .p_multisample_state = &multisampling,
-            .p_depth_stencil_state = null,
+            .p_depth_stencil_state = &depth_stencil,
             .p_color_blend_state = &color_blending,
             .p_dynamic_state = &dynamic_state,
             .layout = self.pipeline_layout,
@@ -1441,7 +1579,7 @@ const HelloTriangleApplication = struct {
         self.swap_chain_image_views = try allocator.alloc(vk.ImageView, self.swap_chain_images.len);
 
         for (self.swap_chain_images, self.swap_chain_image_views) |image, *image_view| {
-            image_view.* = try createImageView(self, image, self.swap_chain_image_format);
+            image_view.* = try createImageView(self, image, self.swap_chain_image_format, .{ .color_bit = true });
         }
     }
 
@@ -1496,6 +1634,10 @@ const HelloTriangleApplication = struct {
     }
 
     fn cleanupSwapChain(self: *HelloTriangleApplication, old_swapchain: vk.SwapchainKHR) !void {
+        vkd.destroyImageView(self.device, self.depth_image_view, null);
+        vkd.destroyImage(self.device, self.depth_image, null);
+        vkd.freeMemory(self.device, self.depth_image_memory, null);
+
         for (self.swap_chain_framebuffers) |framebuffer| {
             vkd.destroyFramebuffer(self.device, framebuffer, null);
         }
@@ -1520,7 +1662,8 @@ const HelloTriangleApplication = struct {
         try createSwapChain(self, window, old_swapchain);
         try cleanupSwapChain(self, old_swapchain);
         try createImageViews(self);
-        try createFrameBuffers(self);
+        try createDepthResources(self);
+        try createFramebuffers(self);
     }
 
     fn createSurface(self: *HelloTriangleApplication, window: glfw.Window) !void {
@@ -1971,12 +2114,54 @@ const HelloTriangleApplication = struct {
     fn updateUniformBuffer(self: *HelloTriangleApplication, current_image: u32) !void {
         const time = self.timer.read() / std.time.ns_per_s;
 
-        // TODO: This UBO is not accurate to the tutorial, but at least lets us see the
-        // rectangle rotating 90 degrees every second, as expected
+        // model
+        const model = Mat4x4.rotateZ(@as(f32, @floatFromInt(time)) * std.math.pi / 2);
+
+        // view matrix
+        const eye = Vec3.splat(1);
+        const center = Vec3.splat(0);
+        const up = vec3(0, 0, 1);
+
+        const f = Vec3.normalize(&Vec3.sub(&center, &eye), 0);
+        var u = Vec3.normalize(&up, 0);
+        const s = Vec3.normalize(&Vec3.cross(&f, &u), 0);
+        u = Vec3.cross(&s, &f);
+
+        var view = Mat4x4.ident;
+        view.v[0].v[0] = s.x();
+        view.v[1].v[0] = s.y();
+        view.v[2].v[0] = s.z();
+        view.v[0].v[1] = u.x();
+        view.v[1].v[1] = u.y();
+        view.v[2].v[1] = u.z();
+        view.v[0].v[2] = -f.x();
+        view.v[1].v[2] = -f.y();
+        view.v[2].v[2] = -f.z();
+        view.v[3].v[0] = -Vec3.dot(&s, &eye);
+        view.v[3].v[1] = -Vec3.dot(&u, &eye);
+        view.v[3].v[2] = Vec3.dot(&f, &eye);
+
+        // projection matrix
+        const angle: f32 = std.math.pi / 2.0;
+        const aspect: f32 =
+            @as(f32, @floatFromInt(self.swap_chain_extent.width)) /
+            @as(f32, @floatFromInt(self.swap_chain_extent.height));
+        const near = 0.1;
+        const far = 10.0;
+
+        const zero = Vec4.splat(0);
+        var proj = Mat4x4.init(&zero, &zero, &zero, &zero);
+        const tan_half_angle = @tan(angle / 2);
+        proj.v[0].v[0] = 1 / (aspect * tan_half_angle);
+        proj.v[1].v[1] = 1 / (tan_half_angle);
+        proj.v[2].v[2] = far / (near - far);
+        proj.v[2].v[3] = -1;
+        proj.v[3].v[2] = -(far * near) / (far - near);
+
         var ubo = UniformBufferObject{
-            .model = Mat4x4.rotateZ(@as(f32, @floatFromInt(time)) * std.math.pi / 2),
-            .view = Mat4x4.scaleScalar(0.5),
-            .proj = Mat4x4.ident,
+            .model = model,
+            .view = view,
+            .proj = proj,
         };
 
         ubo.proj.v[1].v[1] *= -1;
