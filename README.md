@@ -1,6 +1,6 @@
 # Zig Vulkan Tutorial
 
-A repo to track my work on making a more concentrated effort in learning Vulkan with Zig (and GLFW and Mach).
+This repo tracks my work on completing the [Vulkan Tutorial](https://vulkan-tutorial.com/Introduction) in the Zig programming language.
 
 #### Setup
 
