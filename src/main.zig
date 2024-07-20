@@ -4,7 +4,9 @@ const glfw = @import("mach-glfw");
 const vk = @import("vulkan");
 const mach = @import("mach");
 const zigimg = @import("zigimg");
+const obj = @import("obj");
 const textures = @import("textures");
+const models = @import("models");
 
 const vert = @embedFile("vert");
 const frag = @embedFile("frag");
@@ -179,11 +181,34 @@ const UniformBufferObject = struct {
 const Vertex = struct {
     pos: Vec3,
     color: Vec3,
-    texture_xy: Vec2,
+    tex_coord: Vec2,
 
-    pub fn init(pos: Vec3, color: Vec3, texture_xy: Vec2) Vertex {
-        return .{ .pos = pos, .color = color, .texture_xy = texture_xy };
+    pub fn init(pos: Vec3, color: Vec3, tex_coord: Vec2) Vertex {
+        return .{ .pos = pos, .color = color, .tex_coord = tex_coord };
     }
+
+    pub const HashContext = struct {
+        pub fn hash(_: HashContext, v: Vertex) u64 {
+            var h = std.hash.Wyhash.init(0);
+
+            h.update(std.mem.asBytes(&v.pos));
+            h.update(std.mem.asBytes(&v.color));
+            h.update(std.mem.asBytes(&v.tex_coord));
+
+            return h.final();
+        }
+
+        pub fn eql(_: HashContext, a: Vertex, b: Vertex) bool {
+            return a.pos.x() == b.pos.x() and
+                a.pos.y() == b.pos.y() and
+                a.pos.z() == b.pos.z() and
+                a.color.x() == b.color.x() and
+                a.color.y() == b.color.y() and
+                a.color.z() == b.color.z() and
+                a.tex_coord.x() == b.tex_coord.x() and
+                a.tex_coord.y() == b.tex_coord.y();
+        }
+    };
 
     fn getBindingDescription() vk.VertexInputBindingDescription {
         const result = vk.VertexInputBindingDescription{
@@ -211,25 +236,25 @@ const Vertex = struct {
         result[2].binding = 0;
         result[2].location = 2;
         result[2].format = .r32g32_sfloat;
-        result[2].offset = @offsetOf(Vertex, "texture_xy");
+        result[2].offset = @offsetOf(Vertex, "tex_coord");
 
         return result;
     }
 };
 
-var vertices = [_]Vertex{
-    vertex(vec3(-0.5, -0.5, 0), vec3(1, 0, 0), vec2(0, 0)),
-    vertex(vec3(0.5, -0.5, 0), vec3(0, 1, 0), vec2(1, 0)),
-    vertex(vec3(0.5, 0.5, 0), vec3(0, 0, 1), vec2(1, 1)),
-    vertex(vec3(-0.5, 0.5, 0), vec3(1, 1, 1), vec2(0, 1)),
-
-    vertex(vec3(-0.5, -0.5, -0.5), vec3(1, 0, 0), vec2(0, 0)),
-    vertex(vec3(0.5, -0.5, -0.5), vec3(0, 1, 0), vec2(1, 0)),
-    vertex(vec3(0.5, 0.5, -0.5), vec3(0, 0, 1), vec2(1, 1)),
-    vertex(vec3(-0.5, 0.5, -0.5), vec3(1, 1, 1), vec2(0, 1)),
-};
-
-var indices = [_]u16{ 0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4 };
+//var vertices = [_]Vertex{
+//    vertex(vec3(-0.5, -0.5, 0), vec3(1, 0, 0), vec2(0, 0)),
+//    vertex(vec3(0.5, -0.5, 0), vec3(0, 1, 0), vec2(1, 0)),
+//    vertex(vec3(0.5, 0.5, 0), vec3(0, 0, 1), vec2(1, 1)),
+//    vertex(vec3(-0.5, 0.5, 0), vec3(1, 1, 1), vec2(0, 1)),
+//
+//    vertex(vec3(-0.5, -0.5, -0.5), vec3(1, 0, 0), vec2(0, 0)),
+//    vertex(vec3(0.5, -0.5, -0.5), vec3(0, 1, 0), vec2(1, 0)),
+//    vertex(vec3(0.5, 0.5, -0.5), vec3(0, 0, 1), vec2(1, 1)),
+//    vertex(vec3(-0.5, 0.5, -0.5), vec3(1, 1, 1), vec2(0, 1)),
+//};
+//
+//var indices = [_]u32{ 0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4 };
 
 fn printAvailableExtensions(available_extensions: []vk.ExtensionProperties) void {
     std.debug.print("available extensions:\n", .{});
@@ -474,6 +499,10 @@ const HelloTriangleApplication = struct {
     render_finished_semaphores: []vk.Semaphore = undefined,
     in_flight_fences: []vk.Fence = undefined,
     framebuffer_resized: bool = false,
+    //vertices: []Vertex = undefined,
+    //indices: []u32 = undefined,
+    vertices: std.ArrayList(Vertex) = undefined,
+    indices: std.ArrayList(u32) = undefined,
     vertex_buffer: vk.Buffer = .null_handle,
     vertex_buffer_memory: vk.DeviceMemory = .null_handle,
     index_buffer: vk.Buffer = .null_handle,
@@ -497,6 +526,11 @@ const HelloTriangleApplication = struct {
             .started = try std.time.Instant.now(),
             .previous = try std.time.Instant.now(),
         };
+
+        self.vertices = std.ArrayList(Vertex).init(allocator);
+        defer self.vertices.deinit();
+        self.indices = std.ArrayList(u32).init(allocator);
+        defer self.indices.deinit();
 
         // NOTE: Storing a reference to the glfw window seems to cause all sorts of problems
         // where the pointer is resolving to null and causing seg faults, so we pull it out
@@ -559,6 +593,7 @@ const HelloTriangleApplication = struct {
         try createTextureImage(self);
         try createTextureImageView(self);
         try createTextureSampler(self);
+        try loadModel(self);
         try createVertexBuffer(self);
         try createIndexBuffer(self);
         try createUniformBuffers(self);
@@ -566,6 +601,40 @@ const HelloTriangleApplication = struct {
         try createDescriptorSets(self);
         try createCommandBuffers(self);
         try createSyncObjects(self);
+    }
+
+    fn loadModel(self: *HelloTriangleApplication) !void {
+        var model = try obj.parseObj(allocator, models.viking_room_obj);
+        defer model.deinit(allocator);
+
+        var unique_vertices = std.HashMap(Vertex, u32, Vertex.HashContext, std.hash_map.default_max_load_percentage).init(allocator);
+        defer unique_vertices.deinit();
+
+        for (model.meshes) |mesh| {
+            for (mesh.indices) |index| {
+                var v: Vertex = undefined;
+
+                v.pos = vec3(
+                    model.vertices[3 * index.vertex.? + 0],
+                    model.vertices[3 * index.vertex.? + 1],
+                    model.vertices[3 * index.vertex.? + 2],
+                );
+
+                v.tex_coord = vec2(
+                    model.tex_coords[2 * index.tex_coord.? + 0],
+                    1.0 - model.tex_coords[2 * index.tex_coord.? + 1],
+                );
+
+                v.color = Vec3.splat(1);
+
+                if (unique_vertices.get(v) == null) {
+                    try unique_vertices.put(v, @intCast(self.vertices.items.len));
+                    try self.vertices.append(v);
+                }
+
+                try self.indices.append(unique_vertices.get(v).?);
+            }
+        }
     }
 
     fn createDepthResources(self: *HelloTriangleApplication) !void {
@@ -826,7 +895,7 @@ const HelloTriangleApplication = struct {
     }
 
     fn createTextureImage(self: *HelloTriangleApplication) !void {
-        var image = try zigimg.Image.fromMemory(allocator, textures.texture_png);
+        var image = try zigimg.Image.fromMemory(allocator, textures.viking_room_png);
         defer image.deinit();
         try image.convert(.rgba32);
 
@@ -1105,7 +1174,7 @@ const HelloTriangleApplication = struct {
     }
 
     fn createIndexBuffer(self: *HelloTriangleApplication) !void {
-        const buffer_size = @sizeOf(@TypeOf(indices[0])) * indices.len;
+        const buffer_size = @sizeOf(@TypeOf(self.indices.items[0])) * self.indices.items.len;
 
         var staging_buffer: vk.Buffer = .null_handle;
         var staging_buffer_memory: vk.DeviceMemory = .null_handle;
@@ -1123,7 +1192,7 @@ const HelloTriangleApplication = struct {
 
         if (maybe_data) |data| @memcpy(
             @as([*]u8, @ptrCast(data))[0..buffer_size],
-            @as([*]u8, @ptrCast(&indices)),
+            @as([*]u8, @ptrCast(self.indices.items.ptr)),
         );
 
         try createBuffer(
@@ -1142,7 +1211,7 @@ const HelloTriangleApplication = struct {
     }
 
     fn createVertexBuffer(self: *HelloTriangleApplication) !void {
-        const buffer_size = @sizeOf(Vertex) * vertices.len;
+        const buffer_size = @sizeOf(Vertex) * self.vertices.items.len;
 
         var staging_buffer: vk.Buffer = .null_handle;
         var staging_buffer_memory: vk.DeviceMemory = .null_handle;
@@ -1160,7 +1229,7 @@ const HelloTriangleApplication = struct {
 
         if (maybe_data) |data| @memcpy(
             @as([*]u8, @ptrCast(data))[0..buffer_size],
-            @as([*]u8, @ptrCast(&vertices)),
+            @as([*]u8, @ptrCast(self.vertices.items.ptr)),
         );
 
         try createBuffer(
@@ -1231,7 +1300,7 @@ const HelloTriangleApplication = struct {
         const vertex_buffers = [_]vk.Buffer{self.vertex_buffer};
         const offsets = [_]vk.DeviceSize{0};
         vkd.cmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffers, &offsets);
-        vkd.cmdBindIndexBuffer(command_buffer, self.index_buffer, 0, .uint16);
+        vkd.cmdBindIndexBuffer(command_buffer, self.index_buffer, 0, .uint32);
 
         const viewport = vk.Viewport{
             .x = 0,
@@ -1262,7 +1331,7 @@ const HelloTriangleApplication = struct {
             null,
         );
 
-        vkd.cmdDrawIndexed(command_buffer, indices.len, 1, 0, 0, 0);
+        vkd.cmdDrawIndexed(command_buffer, @intCast(self.indices.items.len), 1, 0, 0, 0);
         vkd.cmdEndRenderPass(command_buffer);
         _ = try vkd.endCommandBuffer(command_buffer);
     }

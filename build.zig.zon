@@ -31,6 +31,10 @@
             .url = "https://github.com/zigimg/zigimg/archive/d9dbbe22b5f7b5f1f4772169ed93ffeed8e8124d.tar.gz",
             .hash = "122013646f7038ecc71ddf8a0d7de346d29a6ec40140af57f838b0a975c69af512b0",
         },
+        .obj = .{
+            .url = "https://github.com/chip2n/zig-obj/archive/58f524ed6834790b29ac1e97b2f9e6b7de7b5346.tar.gz",
+            .hash = "1220ff46dcbeb40677c0ce8560b954885beec8b699835d9e6686beab72aa9d422c79",
+        },
     },
     .paths = .{
         "build.zig",

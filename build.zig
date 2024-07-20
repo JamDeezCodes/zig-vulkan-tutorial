@@ -19,6 +19,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("textures/main.zig"),
     });
 
+    const models = b.addModule("models", .{
+        .root_source_file = b.path("models/main.zig"),
+    });
+
     const lib = b.addStaticLibrary(.{
         .name = "zig-vulkan-tutorial",
         // In this case the main source file is merely a path, however, in more
@@ -83,6 +87,7 @@ pub fn build(b: *std.Build) void {
     @import("mach").link(mach_dep.builder, exe);
 
     exe.root_module.addImport("textures", textures);
+    exe.root_module.addImport("models", models);
 
     // Add zigimg to our library and executable
     const zigimg_dep = b.dependency("zigimg", .{
@@ -90,6 +95,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.root_module.addImport("zigimg", zigimg_dep.module("zigimg"));
+
+    // Add zig-obj to our library and executable
+    const obj_dep = b.dependency("obj", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("obj", obj_dep.module("obj"));
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
