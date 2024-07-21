@@ -107,6 +107,7 @@ const DeviceDispatch = vk.DeviceWrapper(&.{
             .cmdBindDescriptorSets = true,
             .cmdCopyBufferToImage = true,
             .cmdPipelineBarrier = true,
+            .cmdBlitImage = true,
             .createSwapchainKHR = true,
             .createImageView = true,
             .createShaderModule = true,
@@ -499,8 +500,6 @@ const HelloTriangleApplication = struct {
     render_finished_semaphores: []vk.Semaphore = undefined,
     in_flight_fences: []vk.Fence = undefined,
     framebuffer_resized: bool = false,
-    //vertices: []Vertex = undefined,
-    //indices: []u32 = undefined,
     vertices: std.ArrayList(Vertex) = undefined,
     indices: std.ArrayList(u32) = undefined,
     vertex_buffer: vk.Buffer = .null_handle,
@@ -513,6 +512,7 @@ const HelloTriangleApplication = struct {
     timer: std.time.Timer = undefined,
     descriptor_pool: vk.DescriptorPool = .null_handle,
     descriptor_sets: []vk.DescriptorSet = undefined,
+    mip_levels: u32 = undefined,
     texture_image: vk.Image = .null_handle,
     texture_image_memory: vk.DeviceMemory = .null_handle,
     texture_image_view: vk.ImageView = .null_handle,
@@ -644,6 +644,7 @@ const HelloTriangleApplication = struct {
             self,
             self.swap_chain_extent.width,
             self.swap_chain_extent.height,
+            1,
             depth_format,
             .optimal,
             .{ .depth_stencil_attachment_bit = true },
@@ -652,9 +653,9 @@ const HelloTriangleApplication = struct {
             &self.depth_image_memory,
         );
 
-        self.depth_image_view = try createImageView(self, self.depth_image, depth_format, .{ .depth_bit = true });
+        self.depth_image_view = try createImageView(self, self.depth_image, depth_format, .{ .depth_bit = true }, 1);
 
-        try transitionImageLayout(self, self.depth_image, depth_format, .undefined, .depth_stencil_attachment_optimal);
+        try transitionImageLayout(self, self.depth_image, depth_format, .undefined, .depth_stencil_attachment_optimal, 1);
     }
 
     fn findSupportedFormat(
@@ -709,7 +710,7 @@ const HelloTriangleApplication = struct {
             .mipmap_mode = .linear,
             .mip_lod_bias = 0,
             .min_lod = 0,
-            .max_lod = 0,
+            .max_lod = @floatFromInt(self.mip_levels),
         };
 
         self.texture_sampler = try vkd.createSampler(self.device, &sampler_info, null);
@@ -720,6 +721,7 @@ const HelloTriangleApplication = struct {
         image: vk.Image,
         format: vk.Format,
         aspect_flags: vk.ImageAspectFlags,
+        mip_levels: u32,
     ) !vk.ImageView {
         const view_info = vk.ImageViewCreateInfo{
             .image = image,
@@ -729,7 +731,7 @@ const HelloTriangleApplication = struct {
             .subresource_range = .{
                 .aspect_mask = aspect_flags,
                 .base_mip_level = 0,
-                .level_count = 1,
+                .level_count = mip_levels,
                 .base_array_layer = 0,
                 .layer_count = 1,
             },
@@ -741,7 +743,7 @@ const HelloTriangleApplication = struct {
     }
 
     fn createTextureImageView(self: *HelloTriangleApplication) !void {
-        self.texture_image_view = try createImageView(self, self.texture_image, .r8g8b8a8_srgb, .{ .color_bit = true });
+        self.texture_image_view = try createImageView(self, self.texture_image, .r8g8b8a8_srgb, .{ .color_bit = true }, self.mip_levels);
     }
 
     fn copyBufferToImage(
@@ -782,6 +784,7 @@ const HelloTriangleApplication = struct {
         format: vk.Format,
         old_layout: vk.ImageLayout,
         new_layout: vk.ImageLayout,
+        mip_levels: u32,
     ) !void {
         const command_buffer = try beginSingleTimeCommands(self);
 
@@ -794,7 +797,7 @@ const HelloTriangleApplication = struct {
             .subresource_range = .{
                 .aspect_mask = .{ .color_bit = true },
                 .base_mip_level = 0,
-                .level_count = 1,
+                .level_count = mip_levels,
                 .base_array_layer = 0,
                 .layer_count = 1,
             },
@@ -860,6 +863,7 @@ const HelloTriangleApplication = struct {
         self: *HelloTriangleApplication,
         image_width: u32,
         image_height: u32,
+        mip_levels: u32,
         format: vk.Format,
         tiling: vk.ImageTiling,
         usage: vk.ImageUsageFlags,
@@ -870,7 +874,7 @@ const HelloTriangleApplication = struct {
         var image_info = vk.ImageCreateInfo{
             .image_type = .@"2d",
             .extent = .{ .width = image_width, .height = image_height, .depth = 1 },
-            .mip_levels = 1,
+            .mip_levels = mip_levels,
             .array_layers = 1,
             .format = format,
             .tiling = tiling,
@@ -899,6 +903,8 @@ const HelloTriangleApplication = struct {
         defer image.deinit();
         try image.convert(.rgba32);
 
+        self.mip_levels = @intFromFloat(@floor(@log2(@as(f32, @floatFromInt(@max(image.width, image.height))))) + 1);
+
         var staging_buffer: vk.Buffer = .null_handle;
         var staging_buffer_memory: vk.DeviceMemory = .null_handle;
 
@@ -925,17 +931,118 @@ const HelloTriangleApplication = struct {
             self,
             @intCast(image.width),
             @intCast(image.height),
+            self.mip_levels,
             .r8g8b8a8_srgb,
             .optimal,
-            .{ .transfer_dst_bit = true, .sampled_bit = true },
+            .{ .transfer_src_bit = true, .transfer_dst_bit = true, .sampled_bit = true },
             .{ .device_local_bit = true },
             &self.texture_image,
             &self.texture_image_memory,
         );
 
-        try transitionImageLayout(self, self.texture_image, .r8g8b8a8_srgb, .undefined, .transfer_dst_optimal);
+        try transitionImageLayout(self, self.texture_image, .r8g8b8a8_srgb, .undefined, .transfer_dst_optimal, self.mip_levels);
         try copyBufferToImage(self, staging_buffer, self.texture_image, @intCast(image.width), @intCast(image.height));
-        try transitionImageLayout(self, self.texture_image, .r8g8b8a8_srgb, .transfer_dst_optimal, .shader_read_only_optimal);
+        //try transitionImageLayout(self, self.texture_image, .r8g8b8a8_srgb, .transfer_dst_optimal, .shader_read_only_optimal, self.mip_levels);
+        try generateMipmaps(self, self.texture_image, .r8g8b8a8_srgb, @intCast(image.width), @intCast(image.height), self.mip_levels);
+    }
+
+    // Implementing resizing in software and loading multiple levels from a file is left as an exercise to the reader.
+    fn generateMipmaps(
+        self: *HelloTriangleApplication,
+        image: vk.Image,
+        image_format: vk.Format,
+        tex_width: i32,
+        tex_height: i32,
+        mip_levels: u32,
+    ) !void {
+        const format_properties = vki.getPhysicalDeviceFormatProperties(self.physical_device, image_format);
+
+        if (!format_properties.optimal_tiling_features.sampled_image_filter_linear_bit) @panic("texture image format does not support linear blitting!");
+
+        const command_buffer = try beginSingleTimeCommands(self);
+
+        var barrier = vk.ImageMemoryBarrier{
+            .image = image,
+            .src_access_mask = .{},
+            .dst_access_mask = .{},
+            .old_layout = .undefined,
+            .new_layout = .undefined,
+            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .subresource_range = .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_mip_level = 0,
+                .base_array_layer = 0,
+                .layer_count = 1,
+                .level_count = 1,
+            },
+        };
+
+        var mip_width = tex_width;
+        var mip_height = tex_height;
+
+        for (1..mip_levels) |i| {
+            barrier.subresource_range.base_mip_level = @intCast(i - 1);
+            barrier.old_layout = .transfer_dst_optimal;
+            barrier.new_layout = .transfer_src_optimal;
+            barrier.src_access_mask = .{ .transfer_write_bit = true };
+            barrier.dst_access_mask = .{ .transfer_read_bit = true };
+
+            vkd.cmdPipelineBarrier(command_buffer, .{ .transfer_bit = true }, .{ .transfer_bit = true }, .{}, 0, null, 0, null, 1, @ptrCast(&barrier));
+
+            const blit = vk.ImageBlit{
+                .src_offsets = .{
+                    .{ .x = 0, .y = 0, .z = 0 },
+                    .{ .x = mip_width, .y = mip_height, .z = 1 },
+                },
+                .src_subresource = .{
+                    .aspect_mask = .{ .color_bit = true },
+                    .mip_level = @intCast(i - 1),
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+                .dst_offsets = .{
+                    .{
+                        .x = 0,
+                        .y = 0,
+                        .z = 0,
+                    },
+                    .{
+                        .x = if (mip_width > 1) @divFloor(mip_width, 2) else 1,
+                        .y = if (mip_height > 1) @divFloor(mip_height, 2) else 1,
+                        .z = 1,
+                    },
+                },
+                .dst_subresource = .{
+                    .aspect_mask = .{ .color_bit = true },
+                    .mip_level = @intCast(i),
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+            };
+
+            vkd.cmdBlitImage(command_buffer, image, .transfer_src_optimal, image, .transfer_dst_optimal, 1, @ptrCast(&blit), .linear);
+
+            barrier.old_layout = .transfer_src_optimal;
+            barrier.new_layout = .shader_read_only_optimal;
+            barrier.src_access_mask = .{ .transfer_read_bit = true };
+            barrier.dst_access_mask = .{ .shader_read_bit = true };
+
+            vkd.cmdPipelineBarrier(command_buffer, .{ .transfer_bit = true }, .{ .fragment_shader_bit = true }, .{}, 0, null, 0, null, 1, @ptrCast(&barrier));
+
+            if (mip_width > 1) mip_width = @divFloor(mip_width, 2);
+            if (mip_height > 1) mip_height = @divFloor(mip_height, 2);
+        }
+
+        barrier.subresource_range.base_mip_level = mip_levels - 1;
+        barrier.old_layout = .transfer_dst_optimal;
+        barrier.new_layout = .shader_read_only_optimal;
+        barrier.src_access_mask = .{ .transfer_write_bit = true };
+        barrier.dst_access_mask = .{ .shader_read_bit = true };
+
+        vkd.cmdPipelineBarrier(command_buffer, .{ .transfer_bit = true }, .{ .fragment_shader_bit = true }, .{}, 0, null, 0, null, 1, @ptrCast(&barrier));
+
+        try endSingleTimeCommands(self, command_buffer);
     }
 
     fn createDescriptorSets(self: *HelloTriangleApplication) !void {
@@ -1648,7 +1755,7 @@ const HelloTriangleApplication = struct {
         self.swap_chain_image_views = try allocator.alloc(vk.ImageView, self.swap_chain_images.len);
 
         for (self.swap_chain_images, self.swap_chain_image_views) |image, *image_view| {
-            image_view.* = try createImageView(self, image, self.swap_chain_image_format, .{ .color_bit = true });
+            image_view.* = try createImageView(self, image, self.swap_chain_image_format, .{ .color_bit = true }, 1);
         }
     }
 
