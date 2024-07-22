@@ -520,6 +520,10 @@ const HelloTriangleApplication = struct {
     depth_image: vk.Image = .null_handle,
     depth_image_memory: vk.DeviceMemory = .null_handle,
     depth_image_view: vk.ImageView = .null_handle,
+    msaa_samples: vk.SampleCountFlags = .{ .@"1_bit" = true },
+    color_image: vk.Image = .null_handle,
+    color_image_memory: vk.DeviceMemory = .null_handle,
+    color_image_view: vk.ImageView = .null_handle,
 
     pub fn run(self: *HelloTriangleApplication) !void {
         self.timer = std.time.Timer{
@@ -588,6 +592,7 @@ const HelloTriangleApplication = struct {
         try createDescriptorSetLayout(self);
         try createGraphicsPipeline(self);
         try createCommandPool(self);
+        try createColorResources(self);
         try createDepthResources(self);
         try createFramebuffers(self);
         try createTextureImage(self);
@@ -601,6 +606,43 @@ const HelloTriangleApplication = struct {
         try createDescriptorSets(self);
         try createCommandBuffers(self);
         try createSyncObjects(self);
+    }
+
+    fn createColorResources(self: *HelloTriangleApplication) !void {
+        const color_format = self.swap_chain_image_format;
+
+        try createImage(
+            self,
+            self.swap_chain_extent.width,
+            self.swap_chain_extent.height,
+            1,
+            self.msaa_samples,
+            color_format,
+            .optimal,
+            .{ .transient_attachment_bit = true, .color_attachment_bit = true },
+            .{ .device_local_bit = true },
+            &self.color_image,
+            &self.color_image_memory,
+        );
+
+        self.color_image_view = try createImageView(self, self.color_image, color_format, .{ .color_bit = true }, 1);
+    }
+
+    fn getMaxUsableSampleCount(self: *HelloTriangleApplication) vk.SampleCountFlags {
+        const physical_device_properties = vki.getPhysicalDeviceProperties(self.physical_device);
+
+        const counts = physical_device_properties.limits.framebuffer_color_sample_counts.intersect(
+            physical_device_properties.limits.framebuffer_depth_sample_counts,
+        );
+
+        if (counts.@"64_bit") return .{ .@"64_bit" = true };
+        if (counts.@"32_bit") return .{ .@"32_bit" = true };
+        if (counts.@"16_bit") return .{ .@"16_bit" = true };
+        if (counts.@"8_bit") return .{ .@"8_bit" = true };
+        if (counts.@"4_bit") return .{ .@"4_bit" = true };
+        if (counts.@"2_bit") return .{ .@"2_bit" = true };
+
+        return .{ .@"1_bit" = true };
     }
 
     fn loadModel(self: *HelloTriangleApplication) !void {
@@ -645,6 +687,7 @@ const HelloTriangleApplication = struct {
             self.swap_chain_extent.width,
             self.swap_chain_extent.height,
             1,
+            self.msaa_samples,
             depth_format,
             .optimal,
             .{ .depth_stencil_attachment_bit = true },
@@ -864,6 +907,7 @@ const HelloTriangleApplication = struct {
         image_width: u32,
         image_height: u32,
         mip_levels: u32,
+        sample_count_flags: vk.SampleCountFlags,
         format: vk.Format,
         tiling: vk.ImageTiling,
         usage: vk.ImageUsageFlags,
@@ -881,7 +925,7 @@ const HelloTriangleApplication = struct {
             .initial_layout = .undefined,
             .usage = usage,
             .sharing_mode = .exclusive,
-            .samples = .{ .@"1_bit" = true },
+            .samples = sample_count_flags,
             .flags = .{},
         };
 
@@ -932,6 +976,7 @@ const HelloTriangleApplication = struct {
             @intCast(image.width),
             @intCast(image.height),
             self.mip_levels,
+            .{ .@"1_bit" = true },
             .r8g8b8a8_srgb,
             .optimal,
             .{ .transfer_src_bit = true, .transfer_dst_bit = true, .sampled_bit = true },
@@ -1479,7 +1524,11 @@ const HelloTriangleApplication = struct {
         self.swap_chain_framebuffers = try allocator.alloc(vk.Framebuffer, self.swap_chain_image_views.len);
 
         for (self.swap_chain_image_views, self.swap_chain_framebuffers) |image_view, *framebuffer| {
-            const attachments = [_]vk.ImageView{ image_view, self.depth_image_view };
+            const attachments = [_]vk.ImageView{
+                self.color_image_view,
+                self.depth_image_view,
+                image_view,
+            };
 
             const framebuffer_info = vk.FramebufferCreateInfo{
                 .render_pass = self.render_pass,
@@ -1497,24 +1546,35 @@ const HelloTriangleApplication = struct {
     fn createRenderPass(self: *HelloTriangleApplication) !void {
         const color_attachment = vk.AttachmentDescription{
             .format = self.swap_chain_image_format,
-            .samples = .{ .@"1_bit" = true },
+            .samples = self.msaa_samples,
             .load_op = .clear,
             .store_op = .store,
             .stencil_load_op = .dont_care,
             .stencil_store_op = .dont_care,
             .initial_layout = .undefined,
-            .final_layout = .present_src_khr,
+            .final_layout = .color_attachment_optimal,
         };
 
         const depth_attachment = vk.AttachmentDescription{
             .format = findDepthFormat(self),
-            .samples = .{ .@"1_bit" = true },
+            .samples = self.msaa_samples,
             .load_op = .clear,
             .store_op = .dont_care,
             .stencil_load_op = .dont_care,
             .stencil_store_op = .dont_care,
             .initial_layout = .undefined,
             .final_layout = .depth_stencil_attachment_optimal,
+        };
+
+        const color_resolve_attachment = vk.AttachmentDescription{
+            .format = self.swap_chain_image_format,
+            .samples = .{ .@"1_bit" = true },
+            .load_op = .dont_care,
+            .store_op = .store,
+            .stencil_load_op = .dont_care,
+            .stencil_store_op = .dont_care,
+            .initial_layout = .undefined,
+            .final_layout = .present_src_khr,
         };
 
         const color_attachment_ref = vk.AttachmentReference{
@@ -1527,11 +1587,17 @@ const HelloTriangleApplication = struct {
             .layout = .depth_stencil_attachment_optimal,
         };
 
+        const color_resolve_attachment_ref = vk.AttachmentReference{
+            .attachment = 2,
+            .layout = .color_attachment_optimal,
+        };
+
         const subpass = vk.SubpassDescription{
             .pipeline_bind_point = .graphics,
             .color_attachment_count = 1,
             .p_color_attachments = &.{color_attachment_ref},
             .p_depth_stencil_attachment = &depth_attachment_ref,
+            .p_resolve_attachments = &.{color_resolve_attachment_ref},
         };
 
         const dependency = vk.SubpassDependency{
@@ -1543,7 +1609,11 @@ const HelloTriangleApplication = struct {
             .dst_access_mask = .{ .color_attachment_write_bit = true, .depth_stencil_attachment_write_bit = true },
         };
 
-        const attachments = [_]vk.AttachmentDescription{ color_attachment, depth_attachment };
+        const attachments = [_]vk.AttachmentDescription{
+            color_attachment,
+            depth_attachment,
+            color_resolve_attachment,
+        };
 
         const render_pass_info = vk.RenderPassCreateInfo{
             .attachment_count = attachments.len,
@@ -1643,9 +1713,9 @@ const HelloTriangleApplication = struct {
         };
 
         const multisampling = vk.PipelineMultisampleStateCreateInfo{
-            .sample_shading_enable = vk.FALSE,
-            .rasterization_samples = .{ .@"1_bit" = true },
-            .min_sample_shading = 1,
+            .sample_shading_enable = vk.TRUE,
+            .rasterization_samples = self.msaa_samples,
+            .min_sample_shading = 0.2,
             .p_sample_mask = null,
             .alpha_to_coverage_enable = vk.FALSE,
             .alpha_to_one_enable = vk.FALSE,
@@ -1810,6 +1880,10 @@ const HelloTriangleApplication = struct {
     }
 
     fn cleanupSwapChain(self: *HelloTriangleApplication, old_swapchain: vk.SwapchainKHR) !void {
+        vkd.destroyImageView(self.device, self.color_image_view, null);
+        vkd.destroyImage(self.device, self.color_image, null);
+        vkd.freeMemory(self.device, self.color_image_memory, null);
+
         vkd.destroyImageView(self.device, self.depth_image_view, null);
         vkd.destroyImage(self.device, self.depth_image, null);
         vkd.freeMemory(self.device, self.depth_image_memory, null);
@@ -1838,6 +1912,7 @@ const HelloTriangleApplication = struct {
         try createSwapChain(self, window, old_swapchain);
         try cleanupSwapChain(self, old_swapchain);
         try createImageViews(self);
+        try createColorResources(self);
         try createDepthResources(self);
         try createFramebuffers(self);
     }
@@ -1869,7 +1944,10 @@ const HelloTriangleApplication = struct {
             };
         }
 
-        const device_features: vk.PhysicalDeviceFeatures = .{ .sampler_anisotropy = vk.TRUE };
+        const device_features: vk.PhysicalDeviceFeatures = .{
+            .sampler_anisotropy = vk.TRUE,
+            .sample_rate_shading = vk.TRUE,
+        };
 
         var create_info: vk.DeviceCreateInfo = .{
             .queue_create_info_count = @intCast(queue_create_infos.len),
@@ -1955,6 +2033,8 @@ const HelloTriangleApplication = struct {
                 }
             }
         }
+
+        self.msaa_samples = getMaxUsableSampleCount(self);
 
         if (self.physical_device == .null_handle) {
             @panic("failed to find suitable GPU!");
